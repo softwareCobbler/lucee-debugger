@@ -37,6 +37,8 @@ import scala.collection.mutable.ArrayBuffer
 import scala.util.Success
 import scala.util.Failure
 import java.nio.charset.StandardCharsets
+import org.eclipse.lsp4j.debug.StepInArguments
+import org.eclipse.lsp4j.debug.StepOutArguments
 
 class CfDebugAdapterProtocolServer extends IDebugProtocolServer {
     private var cfvm_ : CfVirtualMachine = null; // assume non-null
@@ -263,6 +265,32 @@ class CfDebugAdapterProtocolServer extends IDebugProtocolServer {
 
     override def next(args: NextArguments) : CompletableFuture[Void] = {
         cfvm_.step(args.getThreadId());
+
+        clientProxy_.continued({
+            val v = ContinuedEventArguments();
+            v.setThreadId(args.getThreadId());
+            v.setAllThreadsContinued(true);
+            v;
+        })
+
+        return CompletableFuture.completedFuture(null);
+    }
+
+    override def stepIn(args: StepInArguments) : CompletableFuture[Void] = {
+        cfvm_.stepIn(args.getThreadId());
+
+        clientProxy_.continued({
+            val v = ContinuedEventArguments();
+            v.setThreadId(args.getThreadId());
+            v.setAllThreadsContinued(true);
+            v;
+        })
+
+        return CompletableFuture.completedFuture(null);
+    }
+
+    override def stepOut(args: StepOutArguments) : CompletableFuture[Void] = {
+        cfvm_.stepOut(args.getThreadId());
 
         clientProxy_.continued({
             val v = ContinuedEventArguments();

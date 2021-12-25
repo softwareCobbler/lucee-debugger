@@ -6,6 +6,7 @@
 
 package CfDebugAdapter;
 
+import com.sun.jdi.ClassType;
 import com.sun.jdi.ReferenceType;
 import com.sun.jdi.Method;
 
@@ -32,10 +33,24 @@ object SetMirror {
 // so this represents a compiled CF source file
 class PageImplMirror (
     val refType: ReferenceType,
-    val getCompileTime: Method
+    val getCompileTime: Method,
 )
 object PageImplMirror {
     val typename = "lucee.runtime.PageImpl";
+}
+
+class ComponentPageImplMirror(
+    val refType: ReferenceType,
+)
+object ComponentPageImplMirror {
+    val typename = "lucee.runtime.ComponentPageImpl";
+}
+
+class PageBaseMirror(
+    val refType: ReferenceType
+)
+object PageBaseMirror { // abstract base class of all cf-generated page classes
+    val typename = "lucee.runtime.Page";
 }
 
 // PageContext is where the cf engine places runtime information for things like the page's variables scope, and etc.
@@ -74,7 +89,7 @@ object ClassMirror {
 //
 
 class ThreadLocalPageContextMirror(
-    val refType: ReferenceType,
+    val classType: ClassType,
     val get: Method // static
 )
 object ThreadLocalPageContextMirror {

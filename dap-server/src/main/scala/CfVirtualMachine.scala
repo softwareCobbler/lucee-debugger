@@ -298,11 +298,13 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                         // misc java utils
                         MapMirror.typename
                         | SetMirror.typename
-                        | PageImplMirror.typename
                         | PageContextImplMirror.typename
                         | CallStackGetMirror.typename
                         | ClassMirror.typename
                         // cf runtime types
+                        | PageBaseMirror.typename
+                        | PageImplMirror.typename
+                        | ComponentPageImplMirror.typename
                         | ThreadLocalPageContextMirror.typename
                         | ComponentMirror.typename
                         | StructMirror.typename
@@ -336,10 +338,6 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         threadStartRequest.enable();
 
         threadDeathRequest.enable();
-
-        // val mer = vm.eventRequestManager().createMethodEntryRequest();
-        // mer.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
-
     }
 
     /**
@@ -387,9 +385,57 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         synchronized {
             threadManager.get(threadId) match {
                 case Some(threadRef) => {
+                    val allFrames = threadRef.frames();
                     fixme_currentStepRequest = vm.eventRequestManager().createStepRequest(threadRef, StepRequest.STEP_LINE, StepRequest.STEP_OVER);
+                    
                     fixme_currentStepRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
-                    fixme_currentStepRequest.addCountFilter(1);
+                    
+                    fixme_currentStepRequest.addClassFilter(pageBaseMirror.refType);
+                    
+                    fixme_currentStepRequest.enable();
+
+                    // fixme_currentMethodExitRequest = vm.eventRequestManager().createMethodExitRequest();
+                    // fixme_currentMethodExitRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
+                    // fixme_currentMethodExitRequest.enable();
+
+                    threadManager.resumeAll();
+                }
+                case None => ()
+            }
+        }
+    }
+
+    def stepIn(threadId: Int) : Unit = {
+        synchronized {
+            threadManager.get(threadId) match {
+                case Some(threadRef) => {
+                    fixme_currentStepRequest = vm.eventRequestManager().createStepRequest(threadRef, StepRequest.STEP_LINE, StepRequest.STEP_INTO);
+                    fixme_currentStepRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
+
+                    fixme_currentStepRequest.addClassFilter(pageBaseMirror.refType);
+
+                    fixme_currentStepRequest.enable();
+
+                    // fixme_currentMethodExitRequest = vm.eventRequestManager().createMethodExitRequest();
+                    // fixme_currentMethodExitRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
+                    // fixme_currentMethodExitRequest.enable();
+
+                    threadManager.resumeAll();
+                }
+                case None => ()
+            }
+        }
+    }
+
+    def stepOut(threadId: Int) : Unit = {
+        synchronized {
+            threadManager.get(threadId) match {
+                case Some(threadRef) => {
+                    fixme_currentStepRequest = vm.eventRequestManager().createStepRequest(threadRef, StepRequest.STEP_LINE, StepRequest.STEP_OUT);
+                    fixme_currentStepRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
+
+                    fixme_currentStepRequest.addClassFilter(pageBaseMirror.refType);
+
                     fixme_currentStepRequest.enable();
 
                     // fixme_currentMethodExitRequest = vm.eventRequestManager().createMethodExitRequest();
@@ -431,7 +477,28 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         refTypes.get(PageImplMirror.typename) match {
             case null => throw Exception("failure while building PageImpl mirror");
             case refType => {
-                PageImplMirror(refType=refType, getCompileTime = refType.methodsByName("getCompileTime").get(0));
+                val getCompileTime = refType.methodsByName("getCompileTime");
+                PageImplMirror(
+                    refType=refType,
+                    getCompileTime = getCompileTime.get(0));
+            }
+        }
+    }
+
+    lazy val componentPageImplMirror : ComponentPageImplMirror = {
+        refTypes.get(ComponentPageImplMirror.typename) match {
+            case null => throw Exception("failure while building ComponentPageImpl mirror");
+            case refType => {
+                ComponentPageImplMirror(refType=refType)
+            }
+        }
+    }
+
+    lazy val pageBaseMirror : PageBaseMirror = {
+        refTypes.get(PageBaseMirror.typename) match {
+            case null => throw Exception("failure while building PageBase mirror");
+            case refType => {
+                PageBaseMirror(refType=refType)
             }
         }
     }
@@ -454,8 +521,9 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         refTypes.get(ThreadLocalPageContextMirror.typename) match {
             case null => throw Exception("failure while building ThreadLocalPageContext mirror");
             case refType => {
-                val get = refType.methodsByName("get", "()Llucee/runtime/PageContext;")
-                ThreadLocalPageContextMirror(refType=refType, get = get.get(0));
+                val classType = refType.asInstanceOf[ClassType];
+                val get = classType.methodsByName("get", "()Llucee/runtime/PageContext;")
+                ThreadLocalPageContextMirror(classType=classType, get = get.get(0));
             }
         }
     }
@@ -543,11 +611,6 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
     
     ///////////////////
 
-    def hasSource(path: String) : Boolean = {
-        return false;
-    }
-
-
     def getStackTrace(args: StackTraceArguments) : StackTraceResponse = {
         val v = StackTraceResponse();
         // fixme_alwaysOneFrame <-- kludge: has been set in BreakpointEvent handler
@@ -556,6 +619,12 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         v;
     }
 
+    /**
+     * Try to get the PageContext object for a particular jvm frame
+     * We try two different methods:
+     *   - pull arg0 out of the current method, and check if it is a PageContext (often it is, but this is also buggy w/ regards to an invalid code-gen'd `this` slot in `PageImpl.call`)
+     *   - aks ThreadLocalPageContext if it has a PageContext for this thread
+     */
     private def maybeGetPageContext(frame: StackFrame) : Option[PageContext] = {
         val threadRef = frame.thread(); // get the threadRef now, after invoking anything on the thread the frame is marked as having been restarted and accessing frame throws exceptions
         
@@ -570,13 +639,12 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
             case _ => {
                 val fromThreadLocal = Try({
                     threadLocalPageContextMirror
-                        .refType
-                        .classObject()
+                        .classType
                         .invokeMethod(
-                            frame.thread(),
+                            threadRef,
                             threadLocalPageContextMirror.get,
                             ArrayList[Value](),
-                            ObjectReference.INVOKE_NONVIRTUAL | ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[ObjectReference]});
+                            ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[ObjectReference]});
                 fromThreadLocal match {
                     case Success(objectRef) if isPageContext(objectRef) => Some(objectRef);
                     case _ => None
@@ -657,65 +725,102 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                     //     fixme_currentMethodExitRequest = null;
 
                     // }
-                    // case event : StepEvent => {
-                    //     val xxx = Try({
-                    //         vm.eventRequestManager().deleteEventRequest(event.request());
-                    //         fixme_currentStepRequest = null;
-                    //         // if (fixme_currentMethodExitRequest != null) {
-                    //         //     vm.eventRequestManager().deleteEventRequest(fixme_currentMethodExitRequest);
-                    //         //     fixme_currentMethodExitRequest = null;
-                    //         // }
-                            
-                    //         val threadRef = event.thread();
-                    //         val stackFrame = threadRef.frame(0);
-                    //         val refType = event.location().declaringType();
+                    case event : StepEvent => {
+                        vm.eventRequestManager().deleteEventRequest(event.request());
+                        val threadRef = event.thread();
 
-                    //         if (refType == pageContextImplMirror.refType) {
-                    //             // no-op, we've stepped out of <page>.call() and back into <PageContext>
-                    //             // meaning we're done with the CF file and the jvm is back in CF engine code
-                    //             threadRef.resume();
-                    //             threadManager.resumeAll();
-                    //         }
-                    //         else {
-                    //             val pageContext = getPageContext(stackFrame);
-                    //             fixme_currentPageContext = pageContext;
+                        threadManager.markPaused(threadRef);
 
-                    //             val source = {
-                    //                 val source = lsp4j_Source();
-                    //                 sourceManager.get(refType) match {
-                    //                     case Some(cfSourceFileWrapper) => {
-                    //                         val file = java.io.File(cfSourceFileWrapper.absPath);
-                    //                         source.setName(file.getName());
-                    //                         source.setPath(file.getPath());
-                    //                     }
-                    //                     case None => {
-                    //                         source.setName("<<unknown>>")
-                    //                         source.setPath("");
-                    //                     }
-                    //                 }
+                        val stackFrame = threadRef.frame(0);
+                        val allFrames = threadRef.frames();
 
-                    //                 source;
-                    //             }
+                        // if event.location().declaringType() == pageContextImplMirror.refType
+                        // then {
+                        //     // no-op, we've stepped out of <page>.call() and back into <PageContext>
+                        //     // meaning we're done with the CF file and the jvm is back in CF engine code
+                        //     // threadRef.resume();
+                        //     threadManager.resumeAll();
+                        // }
+                        // else
+                        if event.location().declaringType() == pageBaseMirror.refType // && event.location().method().name() == "getPageSource"
+                        then {
+                            // no-op, keep stepping, we are resolving a page for a cfinclude
+                            stepIn(threadRef.hashCode());
+                            ///////////////
+                            // fixme_currentStepRequest = vm.eventRequestManager().createStepRequest(threadRef, StepRequest.STEP_MIN, StepRequest.STEP_INTO);
+                            // fixme_currentStepRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
+                            // fixme_currentStepRequest.addClassFilter(pageBaseMirror.refType);
+                            // fixme_currentStepRequest.enable();
+                            // threadRef.resume();
+                            //////////////
+                        }
+                        else maybeGetPageContext(stackFrame) match {
+                            case Some(pageContext) => {
+                                val refType = event.location().declaringType();
+                                fixme_currentPageContext = pageContext;
+        
+                                val source = {
+                                    val source = lsp4j_Source();
+                                    sourceManager.get(refType) match {
+                                        case Some(cfSourceFileWrapper) => {
+                                            val file = java.io.File(cfSourceFileWrapper.absPath);
+                                            source.setName(file.getName());
+                                            source.setPath(file.getPath());
+                                        }
+                                        case None => {
+                                            source.setName("<<unknown>>")
+                                            source.setPath("");
+                                        }
+                                    }
+        
+                                    source;
+                                }
+        
+                                fixme_alwaysOneFrame.setId(1)
+                                fixme_alwaysOneFrame.setName("stacktop");
+                                fixme_alwaysOneFrame.setLine(event.location().lineNumber());
+                                fixme_alwaysOneFrame.setSource(source);
 
-                    //             fixme_alwaysOneFrame.setId(1)
-                    //             fixme_alwaysOneFrame.setName("stacktop");
-                    //             fixme_alwaysOneFrame.setLine(event.location().lineNumber());
-                    //             fixme_alwaysOneFrame.setSource(source);
+                                fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), java.util.HashSet[CfValueMirror.Scope]());
 
-                    //             threadManager.markPaused(threadRef);
+                                def maybePushScope(scopeStruct: Option[CfValueMirror.Struct], scopeName: ScopeName) = {
+                                    scopeStruct match {
+                                        case Some(scopeStruct) => {
+                                            fixme_frameToScopeMap.get(fixme_alwaysOneFrame.getId())
+                                            .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
+                                        }
+                                        case None => ()
+                                    }
+                                }
 
-                    //             val stoppedEvent = StoppedEventArguments();
-                    //             stoppedEvent.setReason(StoppedEventArgumentsReason.STEP);
-                    //             stoppedEvent.setThreadId(threadRef.hashCode());
-                    //             client.stopped(stoppedEvent);
-                    //         }
-                    //     })
+                                maybePushScope(pageContext.variablesScope(), "variables");
+                                maybePushScope(pageContext.localScope(), "local");
+                                maybePushScope(pageContext.argumentsScope(), "arguments");
 
-                    //     if (xxx.isFailure) { debugOut(xxx.failed.get.toString()) }
-                    // }
+                                threadManager.markPaused(threadRef);
+        
+                                val stoppedEvent = StoppedEventArguments();
+                                stoppedEvent.setReason(StoppedEventArgumentsReason.STEP);
+                                stoppedEvent.setThreadId(threadRef.hashCode());
+                                client.stopped(stoppedEvent)
+                            }
+                            case None => {
+                                // couldn't find a PageContext, there's nothing interesting we can do without it
+                                // resume, and don't notify the client that we hit this breakpoint
+                                // event.thread().resume();
+                                threadManager.resumeAll();
+                            }
+                        }
+                    }
                     case event : BreakpointEvent => {
                         val threadRef = event.thread();
                         val stackFrame = threadRef.frame(0);
+
+                        if (fixme_currentStepRequest != null) {
+                            fixme_currentStepRequest.disable();
+                            fixme_currentStepRequest = null;
+                        }
+
                         maybeGetPageContext(stackFrame) match {
                             case Some(pageContext) => {
                                 val refType = event.location().declaringType();
