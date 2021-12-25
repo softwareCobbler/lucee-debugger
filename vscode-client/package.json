@@ -1,0 +1,83 @@
+{
+  "name": "cfls-debug",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "x": "./node_modules/esbuild/bin/esbuild ./src/extension.ts --bundle --sourcemap --tsconfig=./tsconfig.json --external:vscode --format=cjs --platform=node --outfile=dist/extension.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onDebugResolve:cfml"
+  ],
+  "engines": {
+    "vscode": "^1.63.0"
+  },
+  "contributes": {
+    "breakpoints": [
+      {
+        "language": "cfml"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "cfml",
+        "languages": [
+          "cfml"
+        ],
+        "label": "CFML Debug Adapter",
+        "configurationAttributes": {
+          "attach": {
+            "required": [
+              "hostName",
+              "port",
+              "projectRoot"
+            ],
+            "properties": {
+              "port": {
+                "type": "integer",
+                "description": "Server port that has been configured to accept JDWP connections.",
+                "default": 8000
+              },
+              "hostName": {
+                "type": "string",
+                "description": "Hostname (i.e. `localhost`) or address, of server on which the target CF program is running."
+              },
+              "projectRoot": {
+                "type": "string",
+                "description": "CF compiles CFM(L)/CFC files into Java class files, and will (generally?) mark the `sourceFile` attribute of the class file by applying the following mapping: ('/abs/path/on/server/to/cf/root/index.cfm' -> '/index.cfm'), so we need the project root to map back from the class file to actual project files."
+              },
+              "debugdebug": {
+                "type": "string",
+                "description": "(OPTIONAL) If provided this must be 'attach:<port>' or 'suspend:<port>'. Debugger is spawned allowing JDWP connections to port <port>; if attach is suspend is specified, the debugger waits for a connection immediately on launch."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "cfml",
+            "request": "attach",
+            "name": "Attach to server",
+            "hostName": "localhost",
+            "projectRoot": "${workspaceFolder}",
+            "port": 8000
+          }
+        ],
+        "configurationSnippets": [],
+        "variables": {}
+      }
+    ]
+  },
+  "dependencies": {
+    "@types/node": "^17.0.0",
+    "@types/vscode": "^1.63.1",
+    "vscode-debugadapter": "^1.51.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.14.5"
+  }
+}
