@@ -468,17 +468,17 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         v;
     }
     
-    private class ConsumedFrame(frame: StackFrame) {
+    private class ConsumedFrame(frame: StackFrame, _thread: ThreadReference) {
         // a mis-gen'd frame might throw jdi error 35 -- bad slot, this happens when generating the page's `call` method
         val argumentValues = Try({ frame.getArgumentValues(); }) match {
             case Success(v) => Some(v);
             case Failure(_) => None;
         }
-        val thread = frame.thread;
+        val thread = _thread;
         val __unsafe__frame = frame;
     }
 
-    private def withConsumedFrame(frame: StackFrame, f: (consumedFrame: ConsumedFrame) => Unit) = f(ConsumedFrame(frame));
+    private def withConsumedFrame(frame: StackFrame, thread: ThreadReference, f: (consumedFrame: ConsumedFrame) => Unit) = f(ConsumedFrame(frame, thread));
 
     /**
      * Try to get the PageContext object for a particular jvm frame
@@ -517,7 +517,8 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
     def getThreadListing() : Seq[ThreadReference] = threadManager.getThreadListing();
     def continue_() : Unit = {
         synchronized {
-            threadManager.resumeAll();
+            // could (should?) use the threadManager, but it needs work on correctly tracking all thread start/stop events 100%
+            vm.resume();
         }
     }
 
@@ -531,217 +532,222 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
 
     @tailrec
     private def eventPump() : Unit = {
-        val eventSet = vm.eventQueue().remove();
-        try {
-            eventSet.asScala.foreach(event => {
-                event match {
-                    case event : ClassPrepareEvent => {
-                        debugOut("\t" + event.referenceType.name() + "\n");
-                        CfVirtualMachine.maybeCfSourceFilePath(event.referenceType) match {
-                            case Some(sourcePath) => {
-                                val absPath = classFileSourceFileAttributeToAbsPath(sourcePath).toString();
-                                debugOut("\n[class-prepare]:" + event.referenceType().name() + " -- " + absPath + "\n");
-                                val maybeExisting = sourceManager.get(absPath);
-                                val fresh = sourceManager.add(event.referenceType, absPath);
+        val eventSet = vm.eventQueue().remove(); // blocks
+        synchronized { // isn't this synchronized by virtue of the blocking call above?
+            try {
+                eventSet.asScala.foreach(event => {
+                    event match {
+                        case event : ClassPrepareEvent => {
+                            debugOut("\t" + event.referenceType.name() + "\n");
+                            CfVirtualMachine.maybeCfSourceFilePath(event.referenceType) match {
+                                case Some(sourcePath) => {
+                                    val absPath = classFileSourceFileAttributeToAbsPath(sourcePath).toString();
+                                    debugOut("\n[class-prepare]:" + event.referenceType().name() + " -- " + absPath + "\n");
+                                    val maybeExisting = sourceManager.get(absPath);
+                                    val fresh = sourceManager.add(event.referenceType, absPath);
 
-                                if (fresh == null) debugOut("\nfresh was null\n");
+                                    if (fresh == null) debugOut("\nfresh was null\n");
 
-                                debugOut("[class-prepare]:  old compile time: " + maybeExisting.map(_.compileTime.toString()).getOrElse("") + "\n");
-                                debugOut("[class-prepare]:  new compile time: " + fresh.map(_.compileTime.toString()).getOrElse("") + "\n");
+                                    debugOut("[class-prepare]:  old compile time: " + maybeExisting.map(_.compileTime.toString()).getOrElse("") + "\n");
+                                    debugOut("[class-prepare]:  new compile time: " + fresh.map(_.compileTime.toString()).getOrElse("") + "\n");
 
-                                // probably this is a "new compiled version" of an already existing class file
-                                // i.e the client made an edit to the sourcefile and refreshed the page
-                                (maybeExisting, fresh) match {
-                                    case (Some(existing), Some(fresh)) => {
-                                        debugOut("[class-prepare]: found existing, attempting to move breakpoints...")
-                                        // move existing breakpoints from old classfile to new classfile
-                                        breakpointManager.move(existing, fresh);
-                                        dumpBreakpoints("[class-prepare]");
-                                        // also delete the old reftype from the source manager?
+                                    // probably this is a "new compiled version" of an already existing class file
+                                    // i.e the client made an edit to the sourcefile and refreshed the page
+                                    (maybeExisting, fresh) match {
+                                        case (Some(existing), Some(fresh)) => {
+                                            debugOut("[class-prepare]: found existing, attempting to move breakpoints...")
+                                            // move existing breakpoints from old classfile to new classfile
+                                            breakpointManager.move(existing, fresh);
+                                            dumpBreakpoints("[class-prepare]");
+                                            // also delete the old reftype from the source manager?
+                                        }
+                                        case _ => ()
                                     }
-                                    case _ => ()
-                                }
 
-                                dumpBreakpoints("classPrepare")
+                                    dumpBreakpoints("classPrepare")
+                                }
+                                case None => ();
                             }
-                            case None => ();
+
+                            event.thread().resume();
                         }
+                        case event : ClassUnloadEvent => {
+                            debugOut(event.toString());
+                        }
+                        case event : ThreadStartEvent => {
+                            threadManager.add(event.thread())
+                        }
+                        case event: ThreadDeathEvent => {
+                            threadManager.remove(event.thread())
+                        }
+                        // case event : MethodExitEvent
+                        //     if fixme_currentMethodExitRequest != null => {
+                        //     vm.eventRequestManager().deleteEventRequest(event.request());
+                        //     fixme_currentMethodExitRequest = null;
 
-                        event.thread().resume();
-                    }
-                    case event : ClassUnloadEvent => {
-                        debugOut(event.toString());
-                    }
-                    case event : ThreadStartEvent => {
-                        threadManager.add(event.thread())
-                    }
-                    case event: ThreadDeathEvent => {
-                        threadManager.remove(event.thread())
-                    }
-                    // case event : MethodExitEvent
-                    //     if fixme_currentMethodExitRequest != null => {
-                    //     vm.eventRequestManager().deleteEventRequest(event.request());
-                    //     fixme_currentMethodExitRequest = null;
+                        // }
+                        case event : StepEvent => {
+                            vm.eventRequestManager().deleteEventRequest(event.request());
+                            withConsumedFrame(event.thread().frame(0), event.thread, (consumedFrame) => {
+                                threadManager.markPaused(consumedFrame.thread);
 
-                    // }
-                    case event : StepEvent => {
-                        vm.eventRequestManager().deleteEventRequest(event.request());
-                        withConsumedFrame(event.thread().frame(0), (consumedFrame) => {
-                            threadManager.markPaused(consumedFrame.thread);
-
-                            if event.location().declaringType() == mirrors.pageBase.referenceType // && event.location().method().name() == "getPageSource"
-                            then {
-                                // no-op, keep stepping, we are resolving a page for a cfinclude
-                                stepIn(consumedFrame.thread.hashCode());
-                                ///////////////
-                                // fixme_currentStepRequest = vm.eventRequestManager().createStepRequest(threadRef, StepRequest.STEP_MIN, StepRequest.STEP_INTO);
-                                // fixme_currentStepRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
-                                // fixme_currentStepRequest.addClassFilter(pageBaseMirror.refType);
-                                // fixme_currentStepRequest.enable();
-                                // threadRef.resume();
-                                //////////////
-                            }
-                            else maybeGetPageContext(consumedFrame) match {
-                                case Some(pageContext) => {
-                                    val refType = event.location().declaringType();
-                                    fixme_currentPageContext = pageContext;
-            
-                                    val source = {
-                                        val source = lsp4j_Source();
-                                        sourceManager.get(refType) match {
-                                            case Some(cfSourceFileWrapper) => {
-                                                val file = java.io.File(cfSourceFileWrapper.absPath);
-                                                source.setName(file.getName());
-                                                source.setPath(file.getPath());
+                                if // fixme -- add to class filters for step request
+                                    event.location().declaringType() == mirrors.pageBase.referenceType
+                                    || event.location().declaringType() == mirrors.componentPageImpl.referenceType
+                                    || Try({event.location().declaringType().asInstanceOf[ClassType].sourceName() == "/lucee/Component.cfc"}).getOrElse(false)
+                                then {
+                                    // no-op, keep stepping, we are resolving a page for a cfinclude
+                                    stepIn(consumedFrame.thread.hashCode());
+                                    ///////////////
+                                    // fixme_currentStepRequest = vm.eventRequestManager().createStepRequest(threadRef, StepRequest.STEP_MIN, StepRequest.STEP_INTO);
+                                    // fixme_currentStepRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
+                                    // fixme_currentStepRequest.addClassFilter(pageBaseMirror.refType);
+                                    // fixme_currentStepRequest.enable();
+                                    // threadRef.resume();
+                                    //////////////
+                                }
+                                else maybeGetPageContext(consumedFrame) match {
+                                    case Some(pageContext) => {
+                                        val refType = event.location().declaringType();
+                                        fixme_currentPageContext = pageContext;
+                
+                                        val source = {
+                                            val source = lsp4j_Source();
+                                            sourceManager.get(refType) match {
+                                                case Some(cfSourceFileWrapper) => {
+                                                    val file = java.io.File(cfSourceFileWrapper.absPath);
+                                                    source.setName(file.getName());
+                                                    source.setPath(file.getPath());
+                                                }
+                                                case None => {
+                                                    source.setName("<<unknown>>")
+                                                    source.setPath("");
+                                                }
                                             }
-                                            case None => {
-                                                source.setName("<<unknown>>")
-                                                source.setPath("");
+                
+                                            source;
+                                        }
+                
+                                        fixme_alwaysOneFrame.setId(1)
+                                        fixme_alwaysOneFrame.setName("stacktop");
+                                        fixme_alwaysOneFrame.setLine(event.location().lineNumber());
+                                        fixme_alwaysOneFrame.setSource(source);
+
+                                        fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), java.util.HashSet[CfValueMirror.Scope]());
+
+                                        def maybePushScope(scopeStruct: Option[CfValueMirror.Struct], scopeName: ScopeName) = {
+                                            scopeStruct match {
+                                                case Some(scopeStruct) => {
+                                                    fixme_frameToScopeMap.get(fixme_alwaysOneFrame.getId())
+                                                    .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
+                                                }
+                                                case None => ()
                                             }
                                         }
-            
-                                        source;
+
+                                        maybePushScope(pageContext.variablesScope(), "variables");
+                                        maybePushScope(pageContext.localScope(), "local");
+                                        maybePushScope(pageContext.argumentsScope(), "arguments");
+
+                                        threadManager.markPaused(consumedFrame.thread);
+                
+                                        val stoppedEvent = StoppedEventArguments();
+                                        stoppedEvent.setReason(StoppedEventArgumentsReason.STEP);
+                                        stoppedEvent.setThreadId(consumedFrame.thread.hashCode());
+                                        client.stopped(stoppedEvent)
                                     }
-            
-                                    fixme_alwaysOneFrame.setId(1)
-                                    fixme_alwaysOneFrame.setName("stacktop");
-                                    fixme_alwaysOneFrame.setLine(event.location().lineNumber());
-                                    fixme_alwaysOneFrame.setSource(source);
+                                    case None => {
+                                        // couldn't find a PageContext, there's nothing interesting we can do without it
+                                        // resume, and don't notify the client that we hit this breakpoint
+                                        // event.thread().resume();
+                                        threadManager.resumeAll();
+                                    }
+                                }
+                            });
+                        }
+                        case event : BreakpointEvent => {
+                            withConsumedFrame(event.thread().frame(0), event.thread, (consumedFrame) => {
+                                guardLoadedMirrors(consumedFrame.thread);
 
-                                    fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), java.util.HashSet[CfValueMirror.Scope]());
+                                if (fixme_currentStepRequest != null) {
+                                    fixme_currentStepRequest.disable();
+                                    fixme_currentStepRequest = null;
+                                }
 
-                                    def maybePushScope(scopeStruct: Option[CfValueMirror.Struct], scopeName: ScopeName) = {
-                                        scopeStruct match {
-                                            case Some(scopeStruct) => {
-                                                fixme_frameToScopeMap.get(fixme_alwaysOneFrame.getId())
-                                                .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
+                                maybeGetPageContext(consumedFrame) match {
+                                    case Some(pageContext) => {
+                                        val refType = event.location().declaringType();
+                                        fixme_currentPageContext = pageContext;
+                
+                                        val source = {
+                                            val source = lsp4j_Source();
+                                            sourceManager.get(refType) match {
+                                                case Some(cfSourceFileWrapper) => {
+                                                    val file = java.io.File(cfSourceFileWrapper.absPath);
+                                                    source.setName(file.getName());
+                                                    source.setPath(file.getPath());
+                                                }
+                                                case None => {
+                                                    source.setName("<<unknown>>")
+                                                    source.setPath("");
+                                                }
                                             }
-                                            case None => ()
+                
+                                            source;
                                         }
+                
+                                        fixme_alwaysOneFrame.setId(1)
+                                        fixme_alwaysOneFrame.setName("stacktop");
+                                        fixme_alwaysOneFrame.setLine(event.location().lineNumber());
+                                        fixme_alwaysOneFrame.setSource(source);
+
+                                        fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), java.util.HashSet[CfValueMirror.Scope]());
+
+                                        def maybePushScope(scopeStruct: Option[CfValueMirror.Struct], scopeName: ScopeName) = {
+                                            scopeStruct match {
+                                                case Some(scopeStruct) => {
+                                                    fixme_frameToScopeMap.get(fixme_alwaysOneFrame.getId())
+                                                    .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
+                                                }
+                                                case None => ()
+                                            }
+                                        }
+
+                                        maybePushScope(pageContext.variablesScope(), "variables");
+                                        maybePushScope(pageContext.localScope(), "local");
+                                        maybePushScope(pageContext.argumentsScope(), "arguments");
+
+                                        threadManager.markPaused(consumedFrame.thread);
+                
+                                        val stoppedEvent = StoppedEventArguments();
+                                        stoppedEvent.setReason(StoppedEventArgumentsReason.BREAKPOINT);
+                                        stoppedEvent.setThreadId(consumedFrame.thread.hashCode());
+                                        client.stopped(stoppedEvent)
                                     }
-
-                                    maybePushScope(pageContext.variablesScope(), "variables");
-                                    maybePushScope(pageContext.localScope(), "local");
-                                    maybePushScope(pageContext.argumentsScope(), "arguments");
-
-                                    threadManager.markPaused(consumedFrame.thread);
-            
-                                    val stoppedEvent = StoppedEventArguments();
-                                    stoppedEvent.setReason(StoppedEventArgumentsReason.STEP);
-                                    stoppedEvent.setThreadId(consumedFrame.thread.hashCode());
-                                    client.stopped(stoppedEvent)
+                                    case None => {
+                                        // couldn't find a PageContext, there's nothing interesting we can do without it
+                                        // resume, and don't notify the client that we hit this breakpoint
+                                        event.thread().resume();
+                                    }
                                 }
-                                case None => {
-                                    // couldn't find a PageContext, there's nothing interesting we can do without it
-                                    // resume, and don't notify the client that we hit this breakpoint
-                                    // event.thread().resume();
-                                    threadManager.resumeAll();
-                                }
-                            }
-                        });
+                            });
+                        }
+                        // case event : LocatableEvent => {
+                        //     val threadRef = event.thread();
+                        //     val stackFrame = threadRef.frame(0);
+                        //     val pageContext = getPageContext(stackFrame);
+                        //     pageContext.variablesScope().keyArray().foreach((key) => {
+                        //         println("KEY: " + key);
+                        //     })
+                        // }
+                        case _ => ()
                     }
-                    case event : BreakpointEvent => {
-                        withConsumedFrame(event.thread().frame(0), (consumedFrame) => {
-                            guardLoadedMirrors(consumedFrame.thread);
-
-                            if (fixme_currentStepRequest != null) {
-                                fixme_currentStepRequest.disable();
-                                fixme_currentStepRequest = null;
-                            }
-
-                            maybeGetPageContext(consumedFrame) match {
-                                case Some(pageContext) => {
-                                    val refType = event.location().declaringType();
-                                    fixme_currentPageContext = pageContext;
-            
-                                    val source = {
-                                        val source = lsp4j_Source();
-                                        sourceManager.get(refType) match {
-                                            case Some(cfSourceFileWrapper) => {
-                                                val file = java.io.File(cfSourceFileWrapper.absPath);
-                                                source.setName(file.getName());
-                                                source.setPath(file.getPath());
-                                            }
-                                            case None => {
-                                                source.setName("<<unknown>>")
-                                                source.setPath("");
-                                            }
-                                        }
-            
-                                        source;
-                                    }
-            
-                                    fixme_alwaysOneFrame.setId(1)
-                                    fixme_alwaysOneFrame.setName("stacktop");
-                                    fixme_alwaysOneFrame.setLine(event.location().lineNumber());
-                                    fixme_alwaysOneFrame.setSource(source);
-
-                                    fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), java.util.HashSet[CfValueMirror.Scope]());
-
-                                    def maybePushScope(scopeStruct: Option[CfValueMirror.Struct], scopeName: ScopeName) = {
-                                        scopeStruct match {
-                                            case Some(scopeStruct) => {
-                                                fixme_frameToScopeMap.get(fixme_alwaysOneFrame.getId())
-                                                .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
-                                            }
-                                            case None => ()
-                                        }
-                                    }
-
-                                    maybePushScope(pageContext.variablesScope(), "variables");
-                                    maybePushScope(pageContext.localScope(), "local");
-                                    maybePushScope(pageContext.argumentsScope(), "arguments");
-
-                                    threadManager.markPaused(consumedFrame.thread);
-            
-                                    val stoppedEvent = StoppedEventArguments();
-                                    stoppedEvent.setReason(StoppedEventArgumentsReason.BREAKPOINT);
-                                    stoppedEvent.setThreadId(consumedFrame.thread.hashCode());
-                                    client.stopped(stoppedEvent)
-                                }
-                                case None => {
-                                    // couldn't find a PageContext, there's nothing interesting we can do without it
-                                    // resume, and don't notify the client that we hit this breakpoint
-                                    event.thread().resume();
-                                }
-                            }
-                        });
-                    }
-                    // case event : LocatableEvent => {
-                    //     val threadRef = event.thread();
-                    //     val stackFrame = threadRef.frame(0);
-                    //     val pageContext = getPageContext(stackFrame);
-                    //     pageContext.variablesScope().keyArray().foreach((key) => {
-                    //         println("KEY: " + key);
-                    //     })
-                    // }
-                    case _ => ()
+                })
+            }
+            catch {
+                case any => {
+                    any.getStackTrace().foreach((v) => debugOut(v.toString()));
                 }
-            })
-        }
-        catch {
-            case any => {
-                any.getStackTrace().foreach((v) => debugOut(v.toString()));
             }
         }
 
