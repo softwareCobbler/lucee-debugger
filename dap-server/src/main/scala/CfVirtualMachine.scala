@@ -271,6 +271,15 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         }
     }
 
+    // we can assume that `classUtil` is non-null; if we are unable to make it non-null during initialization, we can't do anything else
+    private var classUtil : ClassUtilMirror = null;
+    var mirrors : JvmMirrors = null;
+    def guardLoadedMirrors(threadRef: ThreadReference) : Unit = {
+        if (mirrors == null) {
+            mirrors = JvmMirrors(threadRef, classUtil);
+        }
+    }
+
     private def kickoff() = {
         def indexVmRefType(refType: ReferenceType) : Option[ReferenceType] = {
             def tryMatchCfCompiledClassFile(refType: ReferenceType) : Boolean = {
@@ -293,26 +302,11 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
             }
 
             def matchJavaClassFile(refType: ReferenceType) : Boolean = {
+                // all we need is ClassUtil, we have to wait to load all other classes through ClassUtil when we get a thread on which we can invoke its static methods
                 refType.name() match {
-                    case
-                        // misc java utils
-                        MapMirror.typename
-                        | SetMirror.typename
-                        | PageContextImplMirror.typename
-                        | CallStackGetMirror.typename
-                        | ClassMirror.typename
-                        // cf runtime types
-                        | PageBaseMirror.typename
-                        | PageImplMirror.typename
-                        | ComponentPageImplMirror.typename
-                        | ThreadLocalPageContextMirror.typename
-                        | ComponentMirror.typename
-                        | StructMirror.typename
-                        | ArrayMirror.typename
-                        | FunctionMirror.typename
-                        | ArrowFunctionMirror.typename
-                        | DoubleMirror.typename => {
-                        refTypes.put(refType.name(), refType);
+                    case ClassUtilMirror.typename => {
+                        val loadClass = refType.methodsByName("loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+                        classUtil = ClassUtilMirror(classType = refType.asInstanceOf[ClassType], loadClass = loadClass.get(0));
                         true;
                     }
                     case _ => false;
@@ -390,7 +384,7 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                     
                     fixme_currentStepRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
                     
-                    fixme_currentStepRequest.addClassFilter(pageBaseMirror.refType);
+                    fixme_currentStepRequest.addClassFilter(mirrors.pageBase.referenceType);
                     
                     fixme_currentStepRequest.enable();
 
@@ -412,7 +406,7 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                     fixme_currentStepRequest = vm.eventRequestManager().createStepRequest(threadRef, StepRequest.STEP_LINE, StepRequest.STEP_INTO);
                     fixme_currentStepRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
 
-                    fixme_currentStepRequest.addClassFilter(pageBaseMirror.refType);
+                    fixme_currentStepRequest.addClassFilter(mirrors.pageBase.referenceType);
 
                     fixme_currentStepRequest.enable();
 
@@ -434,7 +428,7 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                     fixme_currentStepRequest = vm.eventRequestManager().createStepRequest(threadRef, StepRequest.STEP_LINE, StepRequest.STEP_OUT);
                     fixme_currentStepRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
 
-                    fixme_currentStepRequest.addClassFilter(pageBaseMirror.refType);
+                    fixme_currentStepRequest.addClassFilter(mirrors.pageBase.referenceType);
 
                     fixme_currentStepRequest.enable();
 
@@ -449,117 +443,10 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         }
     }
 
-    lazy val mapMirror : MapMirror = {
-        refTypes.get(MapMirror.typename) match {
-            case null => throw Exception();
-            case refType => {
-                MapMirror(
-                    refType=refType,
-                    keySet = refType.methodsByName("keySet").get(0),
-                    get = refType.methodsByName("get").get(0),
-                    size = refType.methodsByName("size").get(0)
-                )
-            }
-        }
-    }
-
-    lazy val setMirror : SetMirror = {
-        refTypes.get(SetMirror.typename) match {
-            case null => throw Exception("failure while building Set mirror");
-            case refType => {
-                val toArray = refType.methodsByName("toArray", "()[Ljava/lang/Object;");
-                SetMirror(refType=refType, toArray = toArray.get(0));
-            }
-        }
-    }
-
-    lazy val pageImplMirror : PageImplMirror = {
-        refTypes.get(PageImplMirror.typename) match {
-            case null => throw Exception("failure while building PageImpl mirror");
-            case refType => {
-                val getCompileTime = refType.methodsByName("getCompileTime");
-                PageImplMirror(
-                    refType=refType,
-                    getCompileTime = getCompileTime.get(0));
-            }
-        }
-    }
-
-    lazy val componentPageImplMirror : ComponentPageImplMirror = {
-        refTypes.get(ComponentPageImplMirror.typename) match {
-            case null => throw Exception("failure while building ComponentPageImpl mirror");
-            case refType => {
-                ComponentPageImplMirror(refType=refType)
-            }
-        }
-    }
-
-    lazy val pageBaseMirror : PageBaseMirror = {
-        refTypes.get(PageBaseMirror.typename) match {
-            case null => throw Exception("failure while building PageBase mirror");
-            case refType => {
-                PageBaseMirror(refType=refType)
-            }
-        }
-    }
-
-    lazy val pageContextImplMirror : PageContextImplMirror = {
-        refTypes.get(PageContextImplMirror.typename) match {
-            case null => throw Exception("failure while building PageContext mirror");
-            case refType => {
-                PageContextImplMirror(
-                    refType=refType,
-                    variablesScope = refType.methodsByName("variablesScope").get(0),
-                    argumentsScope = refType.methodsByName("argumentsScope").get(0),
-                    localScope = refType.methodsByName("localScope").get(0),
-                    getActiveUdf = refType.methodsByName("getActiveUDF").get(0));
-            }
-        }
-    }
-
-    lazy val threadLocalPageContextMirror : ThreadLocalPageContextMirror = {
-        refTypes.get(ThreadLocalPageContextMirror.typename) match {
-            case null => throw Exception("failure while building ThreadLocalPageContext mirror");
-            case refType => {
-                val classType = refType.asInstanceOf[ClassType];
-                val get = classType.methodsByName("get", "()Llucee/runtime/PageContext;")
-                ThreadLocalPageContextMirror(classType=classType, get = get.get(0));
-            }
-        }
-    }
-
-    lazy val callStackGetMirror : CallStackGetMirror = {
-        refTypes.get(CallStackGetMirror.typename) match {
-            case null => throw Exception("failure while building CallStackGet mirror");
-            case refType => {
-                CallStackGetMirror(refType=refType, call=refType.methodsByName("call").get(0))
-            }
-        }
-    }
-
-    lazy val classMirror : ClassMirror = {
-        refTypes.get(ClassMirror.typename) match {
-            case null => throw Exception("failure while building Class mirror")
-            case refType => {
-                ClassMirror(refType=refType, isAssignableFrom = refType.methodsByName("isAssignableFrom").get(0));
-            }
-        }
-    }
-
-    lazy val doubleMirror : DoubleMirror = {
-        refTypes.get(DoubleMirror.typename) match {
-            case null => throw Exception("failure while building Double mirror")
-            case refType => {
-                val doubleValue = refType.methodsByName("doubleValue");
-                DoubleMirror(refType=refType, doubleValue=doubleValue.get(0));
-            }
-        }
-    }
-
     def leftIsSubtypeOfRight(suspendedThreadRef: ThreadReference)(l: ClassObjectReference)(r: ClassObjectReference) : Boolean = {
         val boolRef = r.invokeMethod(
             suspendedThreadRef,
-            classMirror.isAssignableFrom,
+            mirrors.klass.isAssignableFrom,
             Array(l).toList.asJava,
             ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[BooleanValue];
         return boolRef.value();
@@ -569,46 +456,8 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         return leftIsSubtypeOfRight(suspendedThreadRef)(r)(l);
     }
 
-    lazy val componentMirror : ComponentMirror = {
-        refTypes.get(ComponentMirror.typename) match {
-            case null => throw Exception("failure while building Component mirror")
-            case refType => {
-                ComponentMirror(refType=refType);
-            }
-        }
-    }
 
-    lazy val structMirror : StructMirror = {
-        refTypes.get(StructMirror.typename) match {
-            case null => throw Exception("failure whlie building Struct mirror");
-            case refType => StructMirror(refType=refType);
-        }
-    }
 
-    lazy val arrayMirror : ArrayMirror = {
-        refTypes.get(ArrayMirror.typename) match {
-            case null => throw Exception("failure while build Array mirror");
-            case refType => {
-                val toArray = refType.methodsByName("toArray", "()[Ljava/lang/Object;");
-                ArrayMirror(refType=refType, size=refType.methodsByName("size").get(0), toArray=toArray.get(0));
-            }
-        }
-    }
-
-    lazy val functionMirror : FunctionMirror = {
-        refTypes.get(FunctionMirror.typename) match {
-            case null => throw Exception("failure while building Function mirror");
-            case refType => FunctionMirror(refType = refType);
-        }
-    }
-
-    lazy val arrowFunctionMirror : ArrowFunctionMirror = {
-        refTypes.get(ArrowFunctionMirror.typename) match {
-            case null => throw Exception("failure while building ArrowFunction mirror");
-            case refType => ArrowFunctionMirror(refType = refType);
-        }
-    }
-    
     ///////////////////
 
     def getStackTrace(args: StackTraceArguments) : StackTraceResponse = {
@@ -618,6 +467,18 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         v.setTotalFrames(1);
         v;
     }
+    
+    private class ConsumedFrame(frame: StackFrame) {
+        // a mis-gen'd frame might throw jdi error 35 -- bad slot, this happens when generating the page's `call` method
+        val argumentValues = Try({ frame.getArgumentValues(); }) match {
+            case Success(v) => Some(v);
+            case Failure(_) => None;
+        }
+        val thread = frame.thread;
+        val __unsafe__frame = frame;
+    }
+
+    private def withConsumedFrame(frame: StackFrame, f: (consumedFrame: ConsumedFrame) => Unit) = f(ConsumedFrame(frame));
 
     /**
      * Try to get the PageContext object for a particular jvm frame
@@ -625,12 +486,10 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
      *   - pull arg0 out of the current method, and check if it is a PageContext (often it is, but this is also buggy w/ regards to an invalid code-gen'd `this` slot in `PageImpl.call`)
      *   - aks ThreadLocalPageContext if it has a PageContext for this thread
      */
-    private def maybeGetPageContext(frame: StackFrame) : Option[PageContext] = {
-        val threadRef = frame.thread(); // get the threadRef now, after invoking anything on the thread the frame is marked as having been restarted and accessing frame throws exceptions
-        
-        val isPageContext = (v: ObjectReference) => rightIsSubtypeOfLeft(threadRef)(pageContextImplMirror.refType.classObject)(v.referenceType().classObject());
+    private def maybeGetPageContext(consumedFrame: ConsumedFrame) : Option[PageContext] = {
+        val isPageContext = (v: ObjectReference) => rightIsSubtypeOfLeft(consumedFrame.thread)(mirrors.pageContextImpl.classObject)(v.referenceType().classObject());
 
-        val fromJavaMethodArgs = Try({ frame.getArgumentValues().get(0).asInstanceOf[ObjectReference]; });
+        val fromJavaMethodArgs = Try({consumedFrame.argumentValues.get.get(0).asInstanceOf[ObjectReference]});
 
         val pageContextObjectRef = fromJavaMethodArgs match {
             case
@@ -638,11 +497,11 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                 if isPageContext(objectRef) => Some(objectRef);
             case _ => {
                 val fromThreadLocal = Try({
-                    threadLocalPageContextMirror
-                        .classType
+                    mirrors.threadLocalPageContext
+                        .classObject
                         .invokeMethod(
-                            threadRef,
-                            threadLocalPageContextMirror.get,
+                            consumedFrame.thread,
+                            mirrors.threadLocalPageContext.get,
                             ArrayList[Value](),
                             ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[ObjectReference]});
                 fromThreadLocal match {
@@ -652,7 +511,7 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
             }
         }
 
-        pageContextObjectRef.map((objectRef) => PageContext(this, threadRef, objectRef));
+        pageContextObjectRef.map((objectRef) => PageContext(this, consumedFrame.thread, objectRef));
     }
 
     def getThreadListing() : Seq[ThreadReference] = threadManager.getThreadListing();
@@ -727,157 +586,146 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                     // }
                     case event : StepEvent => {
                         vm.eventRequestManager().deleteEventRequest(event.request());
-                        val threadRef = event.thread();
+                        withConsumedFrame(event.thread().frame(0), (consumedFrame) => {
+                            threadManager.markPaused(consumedFrame.thread);
 
-                        threadManager.markPaused(threadRef);
-
-                        val stackFrame = threadRef.frame(0);
-                        val allFrames = threadRef.frames();
-
-                        // if event.location().declaringType() == pageContextImplMirror.refType
-                        // then {
-                        //     // no-op, we've stepped out of <page>.call() and back into <PageContext>
-                        //     // meaning we're done with the CF file and the jvm is back in CF engine code
-                        //     // threadRef.resume();
-                        //     threadManager.resumeAll();
-                        // }
-                        // else
-                        if event.location().declaringType() == pageBaseMirror.refType // && event.location().method().name() == "getPageSource"
-                        then {
-                            // no-op, keep stepping, we are resolving a page for a cfinclude
-                            stepIn(threadRef.hashCode());
-                            ///////////////
-                            // fixme_currentStepRequest = vm.eventRequestManager().createStepRequest(threadRef, StepRequest.STEP_MIN, StepRequest.STEP_INTO);
-                            // fixme_currentStepRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
-                            // fixme_currentStepRequest.addClassFilter(pageBaseMirror.refType);
-                            // fixme_currentStepRequest.enable();
-                            // threadRef.resume();
-                            //////////////
-                        }
-                        else maybeGetPageContext(stackFrame) match {
-                            case Some(pageContext) => {
-                                val refType = event.location().declaringType();
-                                fixme_currentPageContext = pageContext;
-        
-                                val source = {
-                                    val source = lsp4j_Source();
-                                    sourceManager.get(refType) match {
-                                        case Some(cfSourceFileWrapper) => {
-                                            val file = java.io.File(cfSourceFileWrapper.absPath);
-                                            source.setName(file.getName());
-                                            source.setPath(file.getPath());
+                            if event.location().declaringType() == mirrors.pageBase.referenceType // && event.location().method().name() == "getPageSource"
+                            then {
+                                // no-op, keep stepping, we are resolving a page for a cfinclude
+                                stepIn(consumedFrame.thread.hashCode());
+                                ///////////////
+                                // fixme_currentStepRequest = vm.eventRequestManager().createStepRequest(threadRef, StepRequest.STEP_MIN, StepRequest.STEP_INTO);
+                                // fixme_currentStepRequest.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
+                                // fixme_currentStepRequest.addClassFilter(pageBaseMirror.refType);
+                                // fixme_currentStepRequest.enable();
+                                // threadRef.resume();
+                                //////////////
+                            }
+                            else maybeGetPageContext(consumedFrame) match {
+                                case Some(pageContext) => {
+                                    val refType = event.location().declaringType();
+                                    fixme_currentPageContext = pageContext;
+            
+                                    val source = {
+                                        val source = lsp4j_Source();
+                                        sourceManager.get(refType) match {
+                                            case Some(cfSourceFileWrapper) => {
+                                                val file = java.io.File(cfSourceFileWrapper.absPath);
+                                                source.setName(file.getName());
+                                                source.setPath(file.getPath());
+                                            }
+                                            case None => {
+                                                source.setName("<<unknown>>")
+                                                source.setPath("");
+                                            }
                                         }
-                                        case None => {
-                                            source.setName("<<unknown>>")
-                                            source.setPath("");
+            
+                                        source;
+                                    }
+            
+                                    fixme_alwaysOneFrame.setId(1)
+                                    fixme_alwaysOneFrame.setName("stacktop");
+                                    fixme_alwaysOneFrame.setLine(event.location().lineNumber());
+                                    fixme_alwaysOneFrame.setSource(source);
+
+                                    fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), java.util.HashSet[CfValueMirror.Scope]());
+
+                                    def maybePushScope(scopeStruct: Option[CfValueMirror.Struct], scopeName: ScopeName) = {
+                                        scopeStruct match {
+                                            case Some(scopeStruct) => {
+                                                fixme_frameToScopeMap.get(fixme_alwaysOneFrame.getId())
+                                                .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
+                                            }
+                                            case None => ()
                                         }
                                     }
-        
-                                    source;
+
+                                    maybePushScope(pageContext.variablesScope(), "variables");
+                                    maybePushScope(pageContext.localScope(), "local");
+                                    maybePushScope(pageContext.argumentsScope(), "arguments");
+
+                                    threadManager.markPaused(consumedFrame.thread);
+            
+                                    val stoppedEvent = StoppedEventArguments();
+                                    stoppedEvent.setReason(StoppedEventArgumentsReason.STEP);
+                                    stoppedEvent.setThreadId(consumedFrame.thread.hashCode());
+                                    client.stopped(stoppedEvent)
                                 }
-        
-                                fixme_alwaysOneFrame.setId(1)
-                                fixme_alwaysOneFrame.setName("stacktop");
-                                fixme_alwaysOneFrame.setLine(event.location().lineNumber());
-                                fixme_alwaysOneFrame.setSource(source);
-
-                                fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), java.util.HashSet[CfValueMirror.Scope]());
-
-                                def maybePushScope(scopeStruct: Option[CfValueMirror.Struct], scopeName: ScopeName) = {
-                                    scopeStruct match {
-                                        case Some(scopeStruct) => {
-                                            fixme_frameToScopeMap.get(fixme_alwaysOneFrame.getId())
-                                            .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
-                                        }
-                                        case None => ()
-                                    }
+                                case None => {
+                                    // couldn't find a PageContext, there's nothing interesting we can do without it
+                                    // resume, and don't notify the client that we hit this breakpoint
+                                    // event.thread().resume();
+                                    threadManager.resumeAll();
                                 }
-
-                                maybePushScope(pageContext.variablesScope(), "variables");
-                                maybePushScope(pageContext.localScope(), "local");
-                                maybePushScope(pageContext.argumentsScope(), "arguments");
-
-                                threadManager.markPaused(threadRef);
-        
-                                val stoppedEvent = StoppedEventArguments();
-                                stoppedEvent.setReason(StoppedEventArgumentsReason.STEP);
-                                stoppedEvent.setThreadId(threadRef.hashCode());
-                                client.stopped(stoppedEvent)
                             }
-                            case None => {
-                                // couldn't find a PageContext, there's nothing interesting we can do without it
-                                // resume, and don't notify the client that we hit this breakpoint
-                                // event.thread().resume();
-                                threadManager.resumeAll();
-                            }
-                        }
+                        });
                     }
                     case event : BreakpointEvent => {
-                        val threadRef = event.thread();
-                        val stackFrame = threadRef.frame(0);
+                        withConsumedFrame(event.thread().frame(0), (consumedFrame) => {
+                            guardLoadedMirrors(consumedFrame.thread);
 
-                        if (fixme_currentStepRequest != null) {
-                            fixme_currentStepRequest.disable();
-                            fixme_currentStepRequest = null;
-                        }
+                            if (fixme_currentStepRequest != null) {
+                                fixme_currentStepRequest.disable();
+                                fixme_currentStepRequest = null;
+                            }
 
-                        maybeGetPageContext(stackFrame) match {
-                            case Some(pageContext) => {
-                                val refType = event.location().declaringType();
-                                fixme_currentPageContext = pageContext;
-        
-                                val source = {
-                                    val source = lsp4j_Source();
-                                    sourceManager.get(refType) match {
-                                        case Some(cfSourceFileWrapper) => {
-                                            val file = java.io.File(cfSourceFileWrapper.absPath);
-                                            source.setName(file.getName());
-                                            source.setPath(file.getPath());
+                            maybeGetPageContext(consumedFrame) match {
+                                case Some(pageContext) => {
+                                    val refType = event.location().declaringType();
+                                    fixme_currentPageContext = pageContext;
+            
+                                    val source = {
+                                        val source = lsp4j_Source();
+                                        sourceManager.get(refType) match {
+                                            case Some(cfSourceFileWrapper) => {
+                                                val file = java.io.File(cfSourceFileWrapper.absPath);
+                                                source.setName(file.getName());
+                                                source.setPath(file.getPath());
+                                            }
+                                            case None => {
+                                                source.setName("<<unknown>>")
+                                                source.setPath("");
+                                            }
                                         }
-                                        case None => {
-                                            source.setName("<<unknown>>")
-                                            source.setPath("");
+            
+                                        source;
+                                    }
+            
+                                    fixme_alwaysOneFrame.setId(1)
+                                    fixme_alwaysOneFrame.setName("stacktop");
+                                    fixme_alwaysOneFrame.setLine(event.location().lineNumber());
+                                    fixme_alwaysOneFrame.setSource(source);
+
+                                    fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), java.util.HashSet[CfValueMirror.Scope]());
+
+                                    def maybePushScope(scopeStruct: Option[CfValueMirror.Struct], scopeName: ScopeName) = {
+                                        scopeStruct match {
+                                            case Some(scopeStruct) => {
+                                                fixme_frameToScopeMap.get(fixme_alwaysOneFrame.getId())
+                                                .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
+                                            }
+                                            case None => ()
                                         }
                                     }
-        
-                                    source;
+
+                                    maybePushScope(pageContext.variablesScope(), "variables");
+                                    maybePushScope(pageContext.localScope(), "local");
+                                    maybePushScope(pageContext.argumentsScope(), "arguments");
+
+                                    threadManager.markPaused(consumedFrame.thread);
+            
+                                    val stoppedEvent = StoppedEventArguments();
+                                    stoppedEvent.setReason(StoppedEventArgumentsReason.BREAKPOINT);
+                                    stoppedEvent.setThreadId(consumedFrame.thread.hashCode());
+                                    client.stopped(stoppedEvent)
                                 }
-        
-                                fixme_alwaysOneFrame.setId(1)
-                                fixme_alwaysOneFrame.setName("stacktop");
-                                fixme_alwaysOneFrame.setLine(event.location().lineNumber());
-                                fixme_alwaysOneFrame.setSource(source);
-
-                                fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), java.util.HashSet[CfValueMirror.Scope]());
-
-                                def maybePushScope(scopeStruct: Option[CfValueMirror.Struct], scopeName: ScopeName) = {
-                                    scopeStruct match {
-                                        case Some(scopeStruct) => {
-                                            fixme_frameToScopeMap.get(fixme_alwaysOneFrame.getId())
-                                            .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
-                                        }
-                                        case None => ()
-                                    }
+                                case None => {
+                                    // couldn't find a PageContext, there's nothing interesting we can do without it
+                                    // resume, and don't notify the client that we hit this breakpoint
+                                    event.thread().resume();
                                 }
-
-                                maybePushScope(pageContext.variablesScope(), "variables");
-                                maybePushScope(pageContext.localScope(), "local");
-                                maybePushScope(pageContext.argumentsScope(), "arguments");
-
-                                threadManager.markPaused(threadRef);
-        
-                                val stoppedEvent = StoppedEventArguments();
-                                stoppedEvent.setReason(StoppedEventArgumentsReason.BREAKPOINT);
-                                stoppedEvent.setThreadId(threadRef.hashCode());
-                                client.stopped(stoppedEvent)
                             }
-                            case None => {
-                                // couldn't find a PageContext, there's nothing interesting we can do without it
-                                // resume, and don't notify the client that we hit this breakpoint
-                                event.thread().resume();
-                            }
-                        }
-
+                        });
                     }
                     // case event : LocatableEvent => {
                     //     val threadRef = event.thread();
@@ -893,10 +741,7 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         }
         catch {
             case any => {
-                val stacktop = if any.getStackTrace().length > 0
-                    then any.getStackTrace()(0).toString()
-                    else "<<nil>>";
-                debugOut(any.toString() + ":\n" + stacktop);
+                any.getStackTrace().foreach((v) => debugOut(v.toString()));
             }
         }
 
@@ -931,8 +776,8 @@ class CfStruct(val cfvm: CfVirtualMachine, var threadRef: ThreadReference, val o
     export objectRef.{hashCode => _, equals => _, *};
 
     def keyArray() : Iterable[StringReference] = {
-        val keySetRef : ObjectReference = invokeMethod(threadRef, cfvm.mapMirror.keySet, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[ObjectReference];
-        val arrayRef : ArrayReference = keySetRef.invokeMethod(threadRef, cfvm.setMirror.toArray, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[ArrayReference];
+        val keySetRef : ObjectReference = invokeMethod(threadRef, cfvm.mirrors.map.keySet, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[ObjectReference];
+        val arrayRef : ArrayReference = keySetRef.invokeMethod(threadRef, cfvm.mirrors.set.toArray, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[ArrayReference];
         arrayRef.getValues().asScala.map(_.asInstanceOf[StringReference]);
     }
 
@@ -942,12 +787,12 @@ class CfStruct(val cfvm: CfVirtualMachine, var threadRef: ThreadReference, val o
             argList.add(key);
             argList;
         };
-        val result = invokeMethod(threadRef, cfvm.mapMirror.get, argList, ObjectReference.INVOKE_SINGLE_THREADED);
+        val result = invokeMethod(threadRef, cfvm.mirrors.map.get, argList, ObjectReference.INVOKE_SINGLE_THREADED);
         CfValueMirror(cfvm)(threadRef, result);
     }
 
     def count() : Int = {
-        return invokeMethod(threadRef, cfvm.mapMirror.size, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[IntegerValue].value();
+        return invokeMethod(threadRef, cfvm.mirrors.map.size, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[IntegerValue].value();
     }
 
     def foreach(f: (kvPair: (StringReference, CfValueMirror)) => Unit) : Unit = {
@@ -964,7 +809,7 @@ class CfStruct(val cfvm: CfVirtualMachine, var threadRef: ThreadReference, val o
 class PageContext(cfvm: CfVirtualMachine, threadRef: ThreadReference, objectRef: ObjectReference) extends ObjectReference {
     export objectRef.{hashCode => _, equals => _, *};
 
-    def getActiveUDF() : Option[Value] = Option(invokeMethod(threadRef, cfvm.pageContextImplMirror.getActiveUdf, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED));
+    def getActiveUDF() : Option[Value] = Option(invokeMethod(threadRef, cfvm.mirrors.pageContextImpl.getActiveUdf, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED));
 
     def isInUdf() : Boolean = {
         val activeUdf = getActiveUDF();
@@ -977,7 +822,7 @@ class PageContext(cfvm: CfVirtualMachine, threadRef: ThreadReference, objectRef:
     def variablesScope() : Option[CfValueMirror.Struct] = {
         val result : Value = invokeMethod(
             threadRef,
-            cfvm.pageContextImplMirror.variablesScope,
+            cfvm.mirrors.pageContextImpl.variablesScope,
             ArrayList[Value](),
             ObjectReference.INVOKE_SINGLE_THREADED);
 
@@ -989,7 +834,7 @@ class PageContext(cfvm: CfVirtualMachine, threadRef: ThreadReference, objectRef:
     def argumentsScope() : Option[CfValueMirror.Struct] = {
         val result : Value = invokeMethod(
             threadRef,
-            cfvm.pageContextImplMirror.argumentsScope,
+            cfvm.mirrors.pageContextImpl.argumentsScope,
             ArrayList[Value](),
             ObjectReference.INVOKE_SINGLE_THREADED);
 
@@ -1002,7 +847,7 @@ class PageContext(cfvm: CfVirtualMachine, threadRef: ThreadReference, objectRef:
         val result = Try({
             val objectRef = invokeMethod(
                 threadRef,
-                cfvm.pageContextImplMirror.localScope,
+                cfvm.mirrors.pageContextImpl.localScope,
                 ArrayList[Value](),
                 ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[ObjectReference];
             
@@ -1022,10 +867,10 @@ class CfArray(val cfvm: CfVirtualMachine, var threadRef: ThreadReference, val ob
     export objectRef.{hashCode => _, equals => _, *};
 
     def len() : Int = {
-        return invokeMethod(threadRef, cfvm.arrayMirror.size, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[IntegerValue].value();
+        return invokeMethod(threadRef, cfvm.mirrors.array.size, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[IntegerValue].value();
     }
 
-    private def getArrayRef() = invokeMethod(threadRef, cfvm.arrayMirror.toArray, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[ArrayReference];
+    private def getArrayRef() = invokeMethod(threadRef, cfvm.mirrors.array.toArray, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[ArrayReference];
     private def getAll() : Iterable[Value] = getArrayRef().getValues().asScala;
 
     def foreach(f: ((CfValueMirror, Int)) => Unit) : Unit = {
@@ -1137,20 +982,20 @@ object CfValueMirror {
             case stringRef : StringReference => CfValueMirror.String(stringRef.value());
             case objRef : ObjectReference => {
                 val objRefIsSubtypeOf = cfvm.leftIsSubtypeOfRight(threadRef)(objRef.referenceType().classObject());
-                if (objRefIsSubtypeOf(cfvm.arrayMirror.refType.classObject())) {
+                if (objRefIsSubtypeOf(cfvm.mirrors.array.classObject)) {
                     Factory.CfArray(cfvm, threadRef, objRef);
                 }
-                else if (objRefIsSubtypeOf(cfvm.mapMirror.refType.classObject())) {
+                else if (objRefIsSubtypeOf(cfvm.mirrors.map.classObject)) {
                     Factory.CfStruct(cfvm, threadRef, objRef);
                 }
-                else if (objRefIsSubtypeOf(cfvm.doubleMirror.refType.classObject())) {
-                    val asPrimitiveDoubleMirror = objRef.invokeMethod(threadRef, cfvm.doubleMirror.doubleValue, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[DoubleValue];
+                else if (objRefIsSubtypeOf(cfvm.mirrors.double.classObject)) {
+                    val asPrimitiveDoubleMirror = objRef.invokeMethod(threadRef, cfvm.mirrors.double.doubleValue, ArrayList[Value](), ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[DoubleValue];
                     CfValueMirror.Number(asPrimitiveDoubleMirror.value());
                 }
-                else if (objRefIsSubtypeOf(cfvm.arrowFunctionMirror.refType.classObject())) {
+                else if (objRefIsSubtypeOf(cfvm.mirrors.arrowFunction.classObject)) {
                     CfValueMirror.ArrowFunction;
                 }
-                else if (objRefIsSubtypeOf(cfvm.functionMirror.refType.classObject())) {
+                else if (objRefIsSubtypeOf(cfvm.mirrors.function.classObject)) {
                     CfValueMirror.Function;
                 }
                 else {
