@@ -498,12 +498,12 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
             case _ => {
                 val fromThreadLocal = Try({
                     mirrors.threadLocalPageContext
-                        .classObject
+                        .referenceType
                         .invokeMethod(
                             consumedFrame.thread,
                             mirrors.threadLocalPageContext.get,
                             ArrayList[Value](),
-                            ObjectReference.INVOKE_SINGLE_THREADED).asInstanceOf[ObjectReference]});
+                            ClassType.INVOKE_SINGLE_THREADED).asInstanceOf[ObjectReference]});
                 fromThreadLocal match {
                     case Success(objectRef) if isPageContext(objectRef) => Some(objectRef);
                     case _ => None
