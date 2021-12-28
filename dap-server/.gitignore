@@ -1,4 +1,7 @@
 target/
-.bloop
-.bsp
-.metals
+.bloop/
+.bsp/
+.metals/
+
+/project/*
+!/project/plugins.sbt

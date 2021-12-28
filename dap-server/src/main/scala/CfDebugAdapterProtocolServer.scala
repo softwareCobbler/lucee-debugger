@@ -14,6 +14,7 @@ import org.eclipse.lsp4j.debug.launch.DSPLauncher
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer
 import org.eclipse.lsp4j.jsonrpc.Launcher
+import org.eclipse.lsp4j.jsonrpc.RemoteEndpoint
 
 import com.sun.jdi.ObjectReference
 
@@ -32,6 +33,7 @@ import org.eclipse.lsp4j.debug.VariablesArguments
 import org.eclipse.lsp4j.debug.VariablesResponse
 import org.eclipse.lsp4j.debug.Variable
 import org.eclipse.lsp4j.debug.NextArguments
+import org.eclipse.lsp4j.debug.TerminatedEventArguments
 import org.eclipse.lsp4j.debug.ContinuedEventArguments
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Success
@@ -42,37 +44,31 @@ import org.eclipse.lsp4j.debug.StepOutArguments
 
 class CfDebugAdapterProtocolServer extends IDebugProtocolServer {
     private var cfvm_ : CfVirtualMachine = null; // assume non-null
-    private var cfvmStderr_ : Option[OutputStream] = None;
     private var clientProxy_ : IDebugProtocolClient = null; // assume non-null
     private var serverLauncher_ : Launcher[IDebugProtocolClient] = null; // assume non-null
 
-    def debugOut(msg: String) : Unit = {
-        cfvmStderr_ match {
-            case Some(outputStream) => {
-                outputStream.write(utf8(msg + "\n"));
-            }
-            case None => ()
-        }
-    }
-
-    def setCfVmStderr(stderr: OutputStream) : Unit = {
-        cfvmStderr_ = Some(stderr);
-    }
     override def initialize(args: InitializeRequestArguments) : CompletableFuture[Capabilities] = {
         val c = Capabilities()
         //c.setSupportsConfigurationDoneRequest(true);
         CompletableFuture.completedFuture(c);
     }
     override def attach(args: java.util.Map[String, Object]) : CompletableFuture[Void] = {
+        // ??
+        // val log = Logger.getLogger(classOf[RemoteEndpoint].getName());
+        // log.log()
+
         connect("localhost", "8000", socketAttachingConnector) match {
             case Success(vm) => {
-                cfvm_ = CfVirtualMachine(vm, clientProxy_, args.get("projectRoot").toString(), cfvmStderr_);
+                cfvm_ = CfVirtualMachine(vm, clientProxy_, args.get("projectRoot").toString());
                 clientProxy_.initialized();
                 return CompletableFuture.completedFuture[Void](null);
             }
             case Failure(e) => {
-                if (cfvmStderr_.isDefined) cfvmStderr_.get.write(e.toString().getBytes(StandardCharsets.UTF_8))
-                // notify client of failure?...
+                serverLauncher_.getRemoteEndpoint().notify("log/error", new Object() {
+                    val detail = "Couldn't attach to Lucee server";
+                });
+
+                clientProxy_.terminated(TerminatedEventArguments())
                 return CompletableFuture.completedFuture[Void](null);
             }
         }

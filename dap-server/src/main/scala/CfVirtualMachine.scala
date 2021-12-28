@@ -105,7 +105,6 @@ class BreakpointManager(
     }
 
     def tryPushClientBreakpointRequestsToJvm(cfSourceFileWrapper: CfSourceFileWrapper) = {
-        debugOut("tryPushClientBreakpointRequestsToJvm, sourceFileWrapper: " + cfSourceFileWrapper + "\n");
         breakpointClientRequests.get(cfSourceFileWrapper.absPath) match {
             case null => ()
             case breakpoints => put(cfSourceFileWrapper, breakpoints);
@@ -228,8 +227,6 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         deleteVmBreakpoints = (bps: IterableOnce[jdi_BreakpointRequest]) => {
             val vs = ArrayList[jdi_BreakpointRequest]();
             for (bp <- bps.iterator) { vs.add(bp) };
-            debugOut("deleting breakpoints:");
-            vs.asScala.foreach((bp) => debugOut(bp.toString()));
             vm.eventRequestManager().deleteEventRequests(vs);
         }
     );
@@ -260,15 +257,6 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
     
     def dispose() : Unit = {
         vm.dispose()
-    }
-
-    def debugOut(msg: String) : Unit = {
-        stderr match {
-            case Some(outputStream) => {
-                outputStream.write(utf8(msg + "\n"));
-            }
-            case None => ()
-        }
     }
 
     // we can assume that `classUtil` is non-null; if we are unable to make it non-null during initialization, we can't do anything else
@@ -352,13 +340,6 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         Path.of(projectRoot, dropRoot(Path.of(sourceFileAttr)))
     }
 
-    private def dumpBreakpoints(s: String = "") = {
-        debugOut("\n\n" + s + " >> BREAKPOINTS...\n\n");
-        vm.eventRequestManager().breakpointRequests().asScala.foreach((bpr) => {
-            debugOut(bpr.toString() + " @ " + bpr.location().declaringType() + "\n");
-        })
-    }
-
     def putBreakpoints(source: String, breakpoints: List[lsp4j_SourceBreakpoint]) : Unit = {
         breakpointManager.register(source, breakpoints);
 
@@ -368,8 +349,6 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
             }
             case None => ()
         }
-
-        dumpBreakpoints("putBreakpoints");
     }
 
     //var fixme_currentMethodExitRequest : MethodExitRequest = null;
@@ -538,33 +517,23 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                 eventSet.asScala.foreach(event => {
                     event match {
                         case event : ClassPrepareEvent => {
-                            debugOut("\t" + event.referenceType.name() + "\n");
                             CfVirtualMachine.maybeCfSourceFilePath(event.referenceType) match {
                                 case Some(sourcePath) => {
                                     val absPath = classFileSourceFileAttributeToAbsPath(sourcePath).toString();
-                                    debugOut("\n[class-prepare]:" + event.referenceType().name() + " -- " + absPath + "\n");
                                     val maybeExisting = sourceManager.get(absPath);
                                     val fresh = sourceManager.add(event.referenceType, absPath);
-
-                                    if (fresh == null) debugOut("\nfresh was null\n");
-
-                                    debugOut("[class-prepare]:  old compile time: " + maybeExisting.map(_.compileTime.toString()).getOrElse("") + "\n");
-                                    debugOut("[class-prepare]:  new compile time: " + fresh.map(_.compileTime.toString()).getOrElse("") + "\n");
 
                                     // probably this is a "new compiled version" of an already existing class file
                                     // i.e the client made an edit to the sourcefile and refreshed the page
                                     (maybeExisting, fresh) match {
                                         case (Some(existing), Some(fresh)) => {
-                                            debugOut("[class-prepare]: found existing, attempting to move breakpoints...")
                                             // move existing breakpoints from old classfile to new classfile
                                             breakpointManager.move(existing, fresh);
-                                            dumpBreakpoints("[class-prepare]");
                                             // also delete the old reftype from the source manager?
                                         }
                                         case _ => ()
                                     }
 
-                                    dumpBreakpoints("classPrepare")
                                 }
                                 case None => ();
                             }
@@ -572,7 +541,6 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                             event.thread().resume();
                         }
                         case event : ClassUnloadEvent => {
-                            debugOut(event.toString());
                         }
                         case event : ThreadStartEvent => {
                             threadManager.add(event.thread())
@@ -746,7 +714,7 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
             }
             catch {
                 case any => {
-                    any.getStackTrace().foreach((v) => debugOut(v.toString()));
+                    //any.getStackTrace().foreach((v) => debugOut(v.toString()));
                 }
             }
         }

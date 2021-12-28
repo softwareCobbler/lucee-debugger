@@ -16,16 +16,8 @@ import java.io.File
 import java.nio.file.StandardOpenOption
 import scala.util.Try
 
-val debugOutFileStream = Files.newOutputStream(File("/home/anon/cflsd/plugin.rmme.log").toPath(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-def debugOut(string: String) = debugOutFileStream.write(utf8(string))
-val teeOutToDebug = TeeOutputStream(System.out, debugOutFileStream);
-def utf8(string: String) : Array[Byte] = string.getBytes(StandardCharsets.UTF_8);
-
-val teeInToDebug = TeeInputStream(System.in, debugOutFileStream);
-
 @main def hello: Unit = 
-    val (server, launcher) = CfDebugAdapterProtocolServer(teeInToDebug, teeOutToDebug, false, PrintWriter(System.err));
-    server.setCfVmStderr(debugOutFileStream);
+    val (server, launcher) = CfDebugAdapterProtocolServer(System.in, System.out, false, PrintWriter(System.err));
     launcher.startListening();
 
 def socketAttachingConnector : AttachingConnector = {

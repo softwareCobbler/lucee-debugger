@@ -8,7 +8,6 @@ class CfDebugAdapter implements vscode.DebugAdapterDescriptorFactory {
 		if (debugdebug) {
 			const what = /^(listen|suspend):(\d+)$/.exec(debugdebug);
 			if (what) {
-				// uh does this always suspend somehow?
 				const suspend = what[1] === "suspend" ? "y" : "n";
 				const port = what[2];
 				args.push(`-agentlib:jdwp=transport=dt_socket,address=localhost:${port},suspend=${suspend},server=y`)
@@ -24,7 +23,21 @@ class CfDebugAdapter implements vscode.DebugAdapterDescriptorFactory {
 }
 
 export function activate(context: vscode.ExtensionContext) {
+	const outputChannel = vscode.window.createOutputChannel("lucee-debugger");
+	context.subscriptions.push(outputChannel);
 	context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory("cfml", new CfDebugAdapter()));
+	vscode.debug.registerDebugAdapterTrackerFactory("cfml", {
+		createDebugAdapterTracker(session: vscode.DebugSession) {
+			return {
+				onWillReceiveMessage(message: any) : void {
+					outputChannel.append(JSON.stringify(message, null, 4) + "\n");
+				},
+				onDidSendMessage(message: any) : void {
+					outputChannel.append(JSON.stringify(message, null, 4) + "\n");
+				}
+			}
+		}
+	})
 }
 
 export function deactivate() {
