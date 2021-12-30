@@ -142,7 +142,7 @@ class CfDebugAdapterProtocolServer extends IDebugProtocolServer {
         val scopeMirrors = cfvm_.getScopeMirrorsForFrame(args.getFrameId());
         val scopes = ArrayBuffer[org.eclipse.lsp4j.debug.Scope]();
 
-        for (scopeMirror <- scopeMirrors.asScala) {
+        for (scopeMirror <- scopeMirrors) {
             scopes += scopeMirrorToLsp4jScope(scopeMirror);
         }
         

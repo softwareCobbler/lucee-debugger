@@ -3,6 +3,7 @@ package CfDebugAdapter
 import scala.jdk.CollectionConverters._;
 import scala.annotation.tailrec;
 import scala.annotation.targetName;
+import scala.collection.{mutable, immutable}
 
 import com.sun.jdi.*;
 import com.sun.jdi.request.{ClassUnloadRequest, MethodExitRequest, EventRequest, StepRequest, ClassPrepareRequest, ThreadStartRequest, ThreadDeathRequest, BreakpointRequest => jdi_BreakpointRequest};
@@ -39,9 +40,9 @@ class SourceManager() {
     import SourceManager.*;
 
     // from the client/IDE, we will get CFM file paths representing a CF file
-    private val pathToRef = new java.util.HashMap[String, CfSourceFileWrapper]();
+    private val pathToRef = mutable.Map[String, CfSourceFileWrapper]();
     // from the jvm, we will get `ReferenceType` objects representing a CF file in its compiled-to-classfile form
-    private val refSet = new java.util.HashMap[ReferenceType, CfSourceFileWrapper]();
+    private val refSet = mutable.Map[ReferenceType, CfSourceFileWrapper]();
 
     // we only ever add source files if they are live on the jvm
     // so there is no (string, string) overload
@@ -70,8 +71,8 @@ class SourceManager() {
         }
     }
 
-    def get(refType: ReferenceType) : Option[CfSourceFileWrapper] = Option(refSet.get(refType));
-    def get(absPath: String) : Option[CfSourceFileWrapper] = Option(pathToRef.get(absPath));
+    def get(refType: ReferenceType) : Option[CfSourceFileWrapper] = refSet.get(refType);
+    def get(absPath: String) : Option[CfSourceFileWrapper] = pathToRef.get(absPath);
 
     def remove(refType: ReferenceType) : Unit = {
         get(refType) match {
@@ -90,16 +91,16 @@ class BreakpointManager(
     deleteVmBreakpoints: (breakpointRequests: IterableOnce[jdi_BreakpointRequest]) => Unit) {
 
     // map from class file references to their respective jdi breakpoint event requests
-    private val breakpointJdiRequests = java.util.HashMap[ReferenceType, Set[jdi_BreakpointRequest]]();
-    private val breakpointClientRequests = java.util.HashMap[String, List[lsp4j_SourceBreakpoint]]();
+    private val breakpointJdiRequests = mutable.Map[ReferenceType, immutable.Set[jdi_BreakpointRequest]]();
+    private val breakpointClientRequests = mutable.Map[String, List[lsp4j_SourceBreakpoint]]();
 
     def move(from: CfSourceFileWrapper, to: CfSourceFileWrapper) : Unit = {
-        breakpointJdiRequests.get(from.absPath) match {
-            case null => ()
-            case breakpointClientRequests => {
+        breakpointJdiRequests.get(from.refType) match {
+            case Some(breakpointClientRequests) => {
                 deleteVmBreakpoints(breakpointClientRequests);
-                breakpointJdiRequests.remove(from.absPath);
+                breakpointJdiRequests.remove(from.refType);
             }
+            case None => {}
         }
         tryPushClientBreakpointRequestsToJvm(to);
     }
@@ -121,8 +122,8 @@ class BreakpointManager(
 
     def tryPushClientBreakpointRequestsToJvm(cfSourceFileWrapper: CfSourceFileWrapper) = {
         breakpointClientRequests.get(cfSourceFileWrapper.absPath) match {
-            case null => ()
-            case breakpoints => put(cfSourceFileWrapper, breakpoints);
+            case Some(breakpoints) => put(cfSourceFileWrapper, breakpoints);
+            case None => {}
         }
     }
 
@@ -136,9 +137,9 @@ class BreakpointManager(
         }
 
         @tailrec def worker(
-            existing: Set[jdi_BreakpointRequest],
+            existing: immutable.Set[jdi_BreakpointRequest],
             fresh: List[lsp4j_SourceBreakpoint],
-            persistable: Set[jdi_BreakpointRequest]) : Set[jdi_BreakpointRequest] = {
+            persistable: immutable.Set[jdi_BreakpointRequest]) : immutable.Set[jdi_BreakpointRequest] = {
             fresh match {
                 case newRequest :: rest => {
                     findExistingRequestByLineNumber(existing, newRequest.getLine()) match {
@@ -172,8 +173,8 @@ class BreakpointManager(
         }    
 
         val existing = breakpointJdiRequests.get(refType) match {
-            case null => Set[jdi_BreakpointRequest]();
-            case existing => existing;
+            case Some(existing) => existing;
+            case None => immutable.Set[jdi_BreakpointRequest]();
         }
 
         breakpointJdiRequests.put(
@@ -183,9 +184,9 @@ class BreakpointManager(
 }
 
 class ThreadManager {
-    val pageContextMap = java.util.HashMap[ThreadReference, PageContext]();
-    val threadMap = java.util.HashMap[Int, ThreadReference]();
-    val paused = java.util.HashSet[Int](); // if a thread id is not in here, it is running
+    val pageContextMap = mutable.Map[ThreadReference, PageContext]();
+    val threadMap = mutable.Map[Int, ThreadReference]();
+    val paused = mutable.Set[Int](); // if a thread id is not in here, it is running
 
 
     def add(jvmThreadRef: ThreadReference) : Unit = {
@@ -194,8 +195,8 @@ class ThreadManager {
 
     def addPageContext(threadRef: ThreadReference, pageContext: PageContext) : Unit = pageContextMap.put(threadRef, pageContext);
 
-    def get(threadRefHash: Int) : Option[ThreadReference] = Option(threadMap.get(threadRefHash));
-    def getPageContext(threadRef: ThreadReference) : Option[PageContext] = Option(pageContextMap.get(threadRef));
+    def get(threadRefHash: Int) : Option[ThreadReference] = threadMap.get(threadRefHash);
+    def getPageContext(threadRef: ThreadReference) : Option[PageContext] = pageContextMap.get(threadRef);
 
     def remove(threadRefHash: Int) : Unit = {
         threadMap.remove(threadRefHash);
@@ -213,16 +214,16 @@ class ThreadManager {
 
     def getPausedListing() : Iterable[ThreadReference] = {
         val result = ArrayBuffer[ThreadReference]();
-        for (threadId <- paused.iterator.asScala) {
+        for (threadId <- paused) {
             threadMap.get(threadId) match {
-                case null => ()
-                case threadRef => result += threadRef;
+                case Some(threadRef) => result += threadRef;
+                case None => ()
             }
         }
         result;
     }
 
-    def getThreadListing() : Seq[ThreadReference] = threadMap.values().asScala.toList;
+    def getThreadListing() : Iterable[ThreadReference] = threadMap.values;
 
     def resumeAll() : Unit = {
         getPausedListing().foreach((threadRef) => {
@@ -233,7 +234,7 @@ class ThreadManager {
 }
 
 class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr: Option[OutputStream] = None) {
-    private val refTypes = java.util.HashMap[String, ReferenceType]();
+    private val refTypes = mutable.Map[String, ReferenceType]();
 
     private val sourceManager = SourceManager();
     private var threadManager = ThreadManager();
@@ -490,7 +491,7 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr:
         pageContextObjectRef.map((objectRef) => PageContext(this, consumedFrame.thread, objectRef));
     }
 
-    def getThreadListing() : Seq[ThreadReference] = threadManager.getThreadListing();
+    def getThreadListing() : Iterable[ThreadReference] = threadManager.getThreadListing();
     def continue_() : Unit = {
         synchronized {
             // could (should?) use the threadManager, but it needs work on correctly tracking all thread start/stop events 100%
@@ -498,11 +499,12 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr:
         }
     }
 
-    private val fixme_frameToScopeMap = java.util.HashMap[Int, java.util.HashSet[CfValueMirror.Scope]];
+    private val fixme_frameToScopeMap = mutable.Map[Int, mutable.Set[CfValueMirror.Scope]]();
     private val fixme_alwaysOneFrame = lsp4j_StackFrame(); // we set this on every break/step event, we need to figure out how to get at all the cf frames, and handle threads?
     private var fixme_currentPageContext : PageContext = null;
 
-    def getScopeMirrorsForFrame(frameId: Int) : java.util.HashSet[CfValueMirror.Scope] = fixme_frameToScopeMap.get(frameId);
+    // unsafe -- we assume for dev reasons that frameId always returns a scope
+    def getScopeMirrorsForFrame(frameId: Int) : mutable.Set[CfValueMirror.Scope] = fixme_frameToScopeMap.get(frameId).get;
 
     def getCurrentVarScope() = fixme_currentPageContext.variablesScope();
 
@@ -591,13 +593,15 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr:
                                         fixme_alwaysOneFrame.setLine(event.location().lineNumber());
                                         fixme_alwaysOneFrame.setSource(source);
 
-                                        fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), java.util.HashSet[CfValueMirror.Scope]());
+                                        fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), mutable.Set[CfValueMirror.Scope]());
 
                                         def maybePushScope(scopeStruct: Option[CfValueMirror.Struct], scopeName: ScopeName) = {
                                             scopeStruct match {
                                                 case Some(scopeStruct) => {
-                                                    fixme_frameToScopeMap.get(fixme_alwaysOneFrame.getId())
-                                                    .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
+                                                    fixme_frameToScopeMap
+                                                        .get(fixme_alwaysOneFrame.getId())
+                                                        .get // unsafed unchecked Option.get
+                                                        .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
                                                 }
                                                 case None => ()
                                             }
@@ -659,13 +663,15 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr:
                                         fixme_alwaysOneFrame.setLine(event.location().lineNumber());
                                         fixme_alwaysOneFrame.setSource(source);
 
-                                        fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), java.util.HashSet[CfValueMirror.Scope]());
+                                        fixme_frameToScopeMap.put(fixme_alwaysOneFrame.getId(), mutable.Set[CfValueMirror.Scope]());
 
                                         def maybePushScope(scopeStruct: Option[CfValueMirror.Struct], scopeName: ScopeName) = {
                                             scopeStruct match {
                                                 case Some(scopeStruct) => {
-                                                    fixme_frameToScopeMap.get(fixme_alwaysOneFrame.getId())
-                                                    .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
+                                                    fixme_frameToScopeMap
+                                                        .get(fixme_alwaysOneFrame.getId())
+                                                        .get // unsafe unchecked option unwrap
+                                                        .add(CfValueMirror.wrapStructAsScope(scopeStruct, scopeName));
                                                 }
                                                 case None => ()
                                             }
@@ -877,22 +883,11 @@ object CfValueMirror {
     })();
 
     private object ComplexVarMap {
-        private val objectRefMap = java.util.HashMap[ObjectReference, CfValueMirror]();
-        private val idMap = java.util.HashMap[Int, CfValueMirror]();
+        private val objectRefMap = mutable.Map[ObjectReference, CfValueMirror]();
+        private val idMap = mutable.Map[Int, CfValueMirror]();
 
-        def getByObjectRef(objRef: ObjectReference) : Option[CfValueMirror] = {
-            objectRefMap.get(objRef) match {
-                case null => None
-                case existingMirror => Some(existingMirror);
-            }            
-        }
-
-        def getById(id: Int) : Option[CfValueMirror] = {
-            idMap.get(id) match {
-                case null => None
-                case existingMirror => Some(existingMirror);
-            }
-        }
+        def getByObjectRef(objRef: ObjectReference) : Option[CfValueMirror] = objectRefMap.get(objRef);
+        def getById(id: Int) : Option[CfValueMirror] = idMap.get(id);
 
         def put(obj: ObjectReference, cfValueMirror: CfValueMirror, id: Int) : Unit = {
             objectRefMap.put(obj, cfValueMirror);
