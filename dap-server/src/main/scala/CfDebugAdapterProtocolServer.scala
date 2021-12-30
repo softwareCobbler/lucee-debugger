@@ -41,6 +41,7 @@ import scala.util.Failure
 import java.nio.charset.StandardCharsets
 import org.eclipse.lsp4j.debug.StepInArguments
 import org.eclipse.lsp4j.debug.StepOutArguments
+import scala.util.Try
 
 class CfDebugAdapterProtocolServer extends IDebugProtocolServer {
     private var cfvm_ : CfVirtualMachine = null; // assume non-null
@@ -57,18 +58,31 @@ class CfDebugAdapterProtocolServer extends IDebugProtocolServer {
         // val log = Logger.getLogger(classOf[RemoteEndpoint].getName());
         // log.log()
 
-        connect("localhost", "8000", socketAttachingConnector) match {
-            case Success(vm) => {
-                cfvm_ = CfVirtualMachine(vm, clientProxy_, args.get("projectRoot").toString());
-                clientProxy_.initialized();
-                return CompletableFuture.completedFuture[Void](null);
+        val hostName = Try({args.get("hostName").asInstanceOf[String];});
+        val port = Try({args.get("port").asInstanceOf[String];});
+        (hostName, port) match {
+            case (Success(hostName), Success(port)) => {
+                connect(hostName, port, socketAttachingConnector) match {
+                    case Success(vm) => {
+                        cfvm_ = CfVirtualMachine(vm, clientProxy_);
+                        clientProxy_.initialized();
+                        return CompletableFuture.completedFuture[Void](null);
+                    }
+                    case Failure(e) => {
+                        serverLauncher_.getRemoteEndpoint().notify("log/error", new Object() {
+                            val detail = "Couldn't attach to Lucee server";
+                        });
+        
+                        clientProxy_.terminated(TerminatedEventArguments())
+                        return CompletableFuture.completedFuture[Void](null);
+                    }
+                }
             }
-            case Failure(e) => {
+            case _ => {
                 serverLauncher_.getRemoteEndpoint().notify("log/error", new Object() {
-                    val detail = "Couldn't attach to Lucee server";
+                    val detail = "Bad hostname or port.";
                 });
-
-                clientProxy_.terminated(TerminatedEventArguments())
+                clientProxy_.terminated(TerminatedEventArguments());
                 return CompletableFuture.completedFuture[Void](null);
             }
         }

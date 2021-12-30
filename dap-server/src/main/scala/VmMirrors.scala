@@ -1,9 +1,3 @@
-/**
- * "mirrors" (jdi terminology) representing object types in the target VM
- * the assumption is that there is only a small amount of which we are interested in, so we can "declare" them here
- * the CfVm is responsible for scanning the target VM and making an instance of each of these, if it wants to invoke methods or etc. on them
- */
-
 package CfDebugAdapter;
 
 import com.sun.jdi.ClassType;

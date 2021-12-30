@@ -1,5 +1,8 @@
 import * as vscode from "vscode";
 
+// replaced by esbuild at build
+declare const DAP_SERVER_JAR_PATH : string;
+
 class CfDebugAdapter implements vscode.DebugAdapterDescriptorFactory {
 	createDebugAdapterDescriptor(session: vscode.DebugSession, _executable: vscode.DebugAdapterExecutable | undefined): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
 		const debugdebug = session.configuration.debugdebug ?? null;
@@ -14,9 +17,7 @@ class CfDebugAdapter implements vscode.DebugAdapterDescriptorFactory {
 			}
 		}
 
-		args.push(
-			"-jar",
-			"/home/anon/cflsd/dap-server/target/scala-3.1.0/foo-assembly-0.1.0-SNAPSHOT.jar");
+		args.push("-jar", DAP_SERVER_JAR_PATH);
 
 		return new vscode.DebugAdapterExecutable("java", args);
 	}

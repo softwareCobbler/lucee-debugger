@@ -25,8 +25,19 @@ import org.eclipse.lsp4j.debug.StackTraceArguments
 import org.eclipse.lsp4j.debug.StackTraceResponse
 import org.eclipse.lsp4j.debug.{StackFrame => lsp4j_StackFrame}
 import scala.languageFeature.existentials
+import java.io.File
 
-class SourceManager(projectRoot: String) {
+object SourceManager {
+    enum AddOrGetResult(val newest: CfSourceFileWrapper) {
+        case NoChange(current: CfSourceFileWrapper) extends AddOrGetResult(newest = current);
+        case Replace(before: CfSourceFileWrapper, after: CfSourceFileWrapper) extends AddOrGetResult(newest = after);
+        case Add(fresh: CfSourceFileWrapper) extends AddOrGetResult(newest = fresh);
+    }
+
+}
+class SourceManager() {
+    import SourceManager.*;
+
     // from the client/IDE, we will get CFM file paths representing a CF file
     private val pathToRef = new java.util.HashMap[String, CfSourceFileWrapper]();
     // from the jvm, we will get `ReferenceType` objects representing a CF file in its compiled-to-classfile form
@@ -34,13 +45,16 @@ class SourceManager(projectRoot: String) {
 
     // we only ever add source files if they are live on the jvm
     // so there is no (string, string) overload
-    def add(refType: ReferenceType, absPath: String) : Option[CfSourceFileWrapper] = {
+
+    def addOrGet(refType: ReferenceType, absPath: String) : AddOrGetResult = {
+        import AddOrGetResult.*;
+
         val fresh = CfSourceFileWrapper(absPath.toString(), refType);
 
-        def push() : Some[CfSourceFileWrapper] = {
+        def push() : CfSourceFileWrapper = {
             pathToRef.put(fresh.absPath, fresh);
             refSet.put(fresh.refType, fresh);
-            Some(fresh);
+            fresh;
         }
 
         get(absPath) match {
@@ -49,10 +63,10 @@ class SourceManager(projectRoot: String) {
                 val newCompileTime = fresh.compileTime;
 
                 if newCompileTime >= oldCompileTime // why would they be equal?
-                then push();
-                else None
+                then Replace(before=existing, after=push());
+                else NoChange(existing);
             }
-            case None => push();
+            case None => Add(fresh=push());
         }
     }
 
@@ -68,6 +82,7 @@ class SourceManager(projectRoot: String) {
             case None => ()
         }
     }
+    class Foo {}
 }
 
 class BreakpointManager(
@@ -217,10 +232,10 @@ class ThreadManager {
     }
 }
 
-class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, projectRoot: String, stderr: Option[OutputStream] = None) {
+class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr: Option[OutputStream] = None) {
     private val refTypes = java.util.HashMap[String, ReferenceType]();
 
-    private val sourceManager = SourceManager(projectRoot);
+    private val sourceManager = SourceManager();
     private var threadManager = ThreadManager();
     private val breakpointManager = BreakpointManager(
         newVmBreakpoint = vm.eventRequestManager().createBreakpointRequest,
@@ -274,10 +289,10 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                 CfVirtualMachine.maybeCfSourceFilePath(refType) match {                    
                     case None => false;
                     case Some(sourcePath) => {
-                        val absPath = classFileSourceFileAttributeToAbsPath(sourcePath);
+                        val absPath = sourcePath;
 
-                        if (Files.exists(absPath)) {
-                            sourceManager.add(refType, absPath.toString());
+                        if (Files.exists(File(absPath).toPath())) {
+                            sourceManager.addOrGet(refType, absPath.toString());
                         }
                         else {
                             // no-op -- file doesn't exist, probably we appended projectRoot onto an already absolute path?
@@ -320,24 +335,6 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
         threadStartRequest.enable();
 
         threadDeathRequest.enable();
-    }
-
-    /**
-     * compiled files seem to get a source attribute "rooted" to a web folder, like "/index.cfm"
-     * that looks like an abs path, but it's not; we want to drop the root indicator and then join
-     * the actual project root to it
-     * 
-     * this might be weird on windows
-     */
-    private def classFileSourceFileAttributeToAbsPath(sourceFileAttr: String) : Path = {
-        def dropRoot(path: Path) : String = {
-            path.getRoot() match {
-                case null => path.toString()
-                case root => path.toString().substring(root.toString().length)
-            }
-        }
-
-        Path.of(projectRoot, dropRoot(Path.of(sourceFileAttr)))
     }
 
     def putBreakpoints(source: String, breakpoints: List[lsp4j_SourceBreakpoint]) : Unit = {
@@ -518,22 +515,15 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                     event match {
                         case event : ClassPrepareEvent => {
                             CfVirtualMachine.maybeCfSourceFilePath(event.referenceType) match {
-                                case Some(sourcePath) => {
-                                    val absPath = classFileSourceFileAttributeToAbsPath(sourcePath).toString();
-                                    val maybeExisting = sourceManager.get(absPath);
-                                    val fresh = sourceManager.add(event.referenceType, absPath);
-
-                                    // probably this is a "new compiled version" of an already existing class file
-                                    // i.e the client made an edit to the sourcefile and refreshed the page
-                                    (maybeExisting, fresh) match {
-                                        case (Some(existing), Some(fresh)) => {
+                                case Some(absPath) => {
+                                    sourceManager.addOrGet(event.referenceType, absPath) match {
+                                        case SourceManager.AddOrGetResult.Replace(before, after) => {
                                             // move existing breakpoints from old classfile to new classfile
-                                            breakpointManager.move(existing, fresh);
+                                            breakpointManager.move(before, after);
                                             // also delete the old reftype from the source manager?
                                         }
-                                        case _ => ()
+                                        case _ => {}
                                     }
-
                                 }
                                 case None => ();
                             }
@@ -562,7 +552,7 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                                 if // fixme -- add to class filters for step request
                                     event.location().declaringType() == mirrors.pageBase.referenceType
                                     || event.location().declaringType() == mirrors.componentPageImpl.referenceType
-                                    || Try({event.location().declaringType().asInstanceOf[ClassType].sourceName() == "/lucee/Component.cfc"}).getOrElse(false)
+                                    || Try({event.location().declaringType().asInstanceOf[ClassType].sourceName() == "/lucee/Component.cfc"}).getOrElse(false) // might need "ends in" if we're doing abspaths
                                 then {
                                     // no-op, keep stepping, we are resolving a page for a cfinclude
                                     stepIn(consumedFrame.thread.hashCode());
@@ -580,19 +570,19 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, project
                                         fixme_currentPageContext = pageContext;
                 
                                         val source = {
-                                            val source = lsp4j_Source();
-                                            sourceManager.get(refType) match {
-                                                case Some(cfSourceFileWrapper) => {
-                                                    val file = java.io.File(cfSourceFileWrapper.absPath);
-                                                    source.setName(file.getName());
-                                                    source.setPath(file.getPath());
+                                            val sourceWrapper = sourceManager.addOrGet(refType, refType.sourceName()) match {
+                                                case SourceManager.AddOrGetResult.Replace(existing, fresh) => {
+                                                    // swap breakpoints here...
+                                                    fresh;
                                                 }
-                                                case None => {
-                                                    source.setName("<<unknown>>")
-                                                    source.setPath("");
-                                                }
+                                                case otherwise => otherwise.newest;
                                             }
-                
+                                            
+                                            val file = java.io.File(sourceWrapper.absPath);
+                                            val source = lsp4j_Source();
+                                            source.setName(file.getName());
+                                            source.setPath(file.getPath());
+
                                             source;
                                         }
                 
