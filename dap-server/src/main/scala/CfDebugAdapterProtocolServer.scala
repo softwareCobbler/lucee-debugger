@@ -18,6 +18,8 @@ import org.eclipse.lsp4j.jsonrpc.RemoteEndpoint
 
 import com.sun.jdi.ObjectReference
 
+import org.eclipse.lsp4j.jsonrpc.services.JsonRequest;
+
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.PrintWriter
@@ -42,6 +44,7 @@ import java.nio.charset.StandardCharsets
 import org.eclipse.lsp4j.debug.StepInArguments
 import org.eclipse.lsp4j.debug.StepOutArguments
 import scala.util.Try
+import java.{util => ju}
 
 class CfDebugAdapterProtocolServer extends IDebugProtocolServer {
     private var cfvm_ : CfVirtualMachine = null; // assume non-null
@@ -53,6 +56,19 @@ class CfDebugAdapterProtocolServer extends IDebugProtocolServer {
         //c.setSupportsConfigurationDoneRequest(true);
         CompletableFuture.completedFuture(c);
     }
+
+    private def sourcePathGlobRemapperFromAttachArgs(args: java.util.Map[String, Object]) : PathGlobRemapper = {
+        args.get("remapSourcePaths") match {
+            case fromTo : java.util.Map[Object @unchecked, Object @unchecked] => {
+                (fromTo.get("from"), fromTo.get("to")) match {
+                    case (from : String, to : String) => PathGlobRemapper(from, to)
+                    case _ => PathGlobRemapper.identityRemapper
+                }
+            }
+            case _ => PathGlobRemapper.identityRemapper;
+        }
+    }
+
     override def attach(args: java.util.Map[String, Object]) : CompletableFuture[Void] = {
         // ??
         // val log = Logger.getLogger(classOf[RemoteEndpoint].getName());
@@ -60,11 +76,13 @@ class CfDebugAdapterProtocolServer extends IDebugProtocolServer {
 
         val hostName = Try({args.get("hostName").asInstanceOf[String];});
         val port = Try({args.get("port").asInstanceOf[String];});
+        
         (hostName, port) match {
             case (Success(hostName), Success(port)) => {
                 connect(hostName, port, socketAttachingConnector) match {
                     case Success(vm) => {
-                        cfvm_ = CfVirtualMachine(vm, clientProxy_);
+                        val sourcePathRemapper = sourcePathGlobRemapperFromAttachArgs(args);
+                        cfvm_ = CfVirtualMachine(vm, clientProxy_, sourcePathRemapper);
                         clientProxy_.initialized();
                         return CompletableFuture.completedFuture[Void](null);
                     }
@@ -311,6 +329,16 @@ class CfDebugAdapterProtocolServer extends IDebugProtocolServer {
 
         return CompletableFuture.completedFuture(null);
     }
+
+    @JsonRequest
+    def showLoadedClasses() : CompletableFuture[XXX] = {
+        val result = cfvm_.getCfClassListing();
+        return CompletableFuture.completedFuture(result);
+    }
+}
+
+class XXX {
+    var names : Array[String] = Array();
 }
 
 object CfDebugAdapterProtocolServer {

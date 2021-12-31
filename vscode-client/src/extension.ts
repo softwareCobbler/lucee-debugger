@@ -3,6 +3,8 @@ import * as vscode from "vscode";
 // replaced by esbuild at build
 declare const DAP_SERVER_JAR_PATH : string;
 
+let currentDebugSession : vscode.DebugSession | null = null;
+
 class CfDebugAdapter implements vscode.DebugAdapterDescriptorFactory {
 	createDebugAdapterDescriptor(session: vscode.DebugSession, _executable: vscode.DebugAdapterExecutable | undefined): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
 		const debugdebug = session.configuration.debugdebug ?? null;
@@ -19,14 +21,22 @@ class CfDebugAdapter implements vscode.DebugAdapterDescriptorFactory {
 
 		args.push("-jar", DAP_SERVER_JAR_PATH);
 
+		currentDebugSession = session;
 		return new vscode.DebugAdapterExecutable("java", args);
 	}
+	
 }
 
 export function activate(context: vscode.ExtensionContext) {
 	const outputChannel = vscode.window.createOutputChannel("lucee-debugger");
 	context.subscriptions.push(outputChannel);
 	context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory("cfml", new CfDebugAdapter()));
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("luceeDebugger.showLoadedClasses", () => {
+			currentDebugSession?.customRequest("showLoadedClasses");
+		}));
+
 	vscode.debug.registerDebugAdapterTrackerFactory("cfml", {
 		createDebugAdapterTracker(session: vscode.DebugSession) {
 			return {
@@ -42,5 +52,5 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
-
+	currentDebugSession = null;
 }

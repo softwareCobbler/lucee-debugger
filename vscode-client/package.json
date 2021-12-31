@@ -22,6 +22,13 @@
         "language": "cfml"
       }
     ],
+    "commands": [
+      {
+        "command": "luceeDebugger.showLoadedClasses",
+        "title": "Lucee debugger: Show loaded CF classes",
+        "enablement": "debugType == 'cfml'"
+      }
+    ],
     "debuggers": [
       {
         "type": "cfml",
@@ -34,7 +41,7 @@
             "required": [
               "hostName",
               "port",
-              "projectRoot"
+              "remapSourcePaths"
             ],
             "properties": {
               "port": {
@@ -46,9 +53,17 @@
                 "type": "string",
                 "description": "Hostname (i.e. `localhost`) or address, of server on which the target CF program is running."
               },
-              "projectRoot": {
-                "type": "string",
-                "description": "CF compiles CFM(L)/CFC files into Java class files, and will (generally?) mark the `sourceFile` attribute of the class file by applying the following mapping: ('/abs/path/on/server/to/cf/root/index.cfm' -> '/index.cfm'), so we need the project root to map back from the class file to actual project files."
+              "remapSourcePaths": {
+                "type": "object",
+                "properties": {
+                  "from": {"type": "string"},
+                  "to": {"type": "string"}
+                },
+                "description": "e.g. {\"from\": \"/app/*\", \"to\": \"/foo/bar/*\"} would resolve breakpoints for a file compiled as '/app/index.cfm' to '/foo/bar/index.cfm'",
+                "default": {
+                  "from": "/appRoot/*",
+                  "to": "${workspaceFolder}/*"
+                }
               },
               "debugdebug": {
                 "type": "string",

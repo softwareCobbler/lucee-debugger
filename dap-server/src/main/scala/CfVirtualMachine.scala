@@ -233,7 +233,9 @@ class ThreadManager {
     }
 }
 
-class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr: Option[OutputStream] = None) {
+class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, sourcePathRemapper: PathGlobRemapper, stderr: Option[OutputStream] = None) {
+    import CfVirtualMachine.*;
+
     private val refTypes = mutable.Map[String, ReferenceType]();
 
     private val sourceManager = SourceManager();
@@ -336,6 +338,23 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr:
         threadStartRequest.enable();
 
         threadDeathRequest.enable();
+    }
+
+    def getCfClassListing() : XXX = {
+        val pattern = """(?i)\.(cfm|cfc|cfml)$""".r;
+        val loadedClasses = vm
+            .allClasses()
+            .asScala
+            .filter((refType) => Try({pattern.findFirstIn(refType.sourceName()).isDefined}).fold(_ => false, identity))
+            .map((refType) => refType.sourceName() + " as " + refType.name)
+            .toArray;
+            // .collect({
+            //     case refType
+            //     if pattern.findFirstIn(refType.sourceName()).isDefined => refType.sourceName()
+            // }).toArray;
+        val result = XXX();
+        result.names = loadedClasses;
+        result;
     }
 
     def putBreakpoints(source: String, breakpoints: List[lsp4j_SourceBreakpoint]) : Unit = {
@@ -447,10 +466,7 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr:
     
     private class ConsumedFrame(frame: StackFrame, _thread: ThreadReference) {
         // a mis-gen'd frame might throw jdi error 35 -- bad slot, this happens when generating the page's `call` method
-        val argumentValues = Try({ frame.getArgumentValues(); }) match {
-            case Success(v) => Some(v);
-            case Failure(_) => None;
-        }
+        val argumentValues = Try({ frame.getArgumentValues(); }).fold(_ => None, frame => Some(frame));
         val thread = _thread;
         val __unsafe__frame = frame;
     }
@@ -516,19 +532,19 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr:
                 eventSet.asScala.foreach(event => {
                     event match {
                         case event : ClassPrepareEvent => {
-                            CfVirtualMachine.maybeCfSourceFilePath(event.referenceType) match {
-                                case Some(absPath) => {
-                                    sourceManager.addOrGet(event.referenceType, absPath) match {
-                                        case SourceManager.AddOrGetResult.Replace(before, after) => {
-                                            // move existing breakpoints from old classfile to new classfile
-                                            breakpointManager.move(before, after);
-                                            // also delete the old reftype from the source manager?
-                                        }
-                                        case _ => {}
+                            if isCfSourceFile(event.referenceType)
+                            then {
+                                val absPath = sourcePathRemapper.remap(event.referenceType.sourceName);
+                                sourceManager.addOrGet(event.referenceType, absPath) match {
+                                    case SourceManager.AddOrGetResult.Replace(before, after) => {
+                                        // move existing breakpoints from old classfile to new classfile
+                                        // also delete the old reftype from the source manager?
+                                        breakpointManager.move(before, after);
                                     }
+                                    case _ => {}
                                 }
-                                case None => ();
                             }
+                            else {}
 
                             event.thread().resume();
                         }
@@ -554,7 +570,7 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr:
                                 if // fixme -- add to class filters for step request
                                     event.location().declaringType() == mirrors.pageBase.referenceType
                                     || event.location().declaringType() == mirrors.componentPageImpl.referenceType
-                                    || Try({event.location().declaringType().asInstanceOf[ClassType].sourceName() == "/lucee/Component.cfc"}).getOrElse(false) // might need "ends in" if we're doing abspaths
+                                    || Try({event.location.declaringType.sourceName == "/lucee/Component.cfc"}).getOrElse(false) // might need "ends in" if we're doing abspaths
                                 then {
                                     // no-op, keep stepping, we are resolving a page for a cfinclude
                                     stepIn(consumedFrame.thread.hashCode());
@@ -566,25 +582,20 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr:
                                     // threadRef.resume();
                                     //////////////
                                 }
-                                else maybeGetPageContext(consumedFrame) match {
+                                else if isCfSourceFile(event.location.declaringType)
+                                then maybeGetPageContext(consumedFrame) match {
                                     case Some(pageContext) => {
                                         val refType = event.location().declaringType();
                                         fixme_currentPageContext = pageContext;
                 
                                         val source = {
-                                            val sourceWrapper = sourceManager.addOrGet(refType, refType.sourceName()) match {
-                                                case SourceManager.AddOrGetResult.Replace(existing, fresh) => {
-                                                    // swap breakpoints here...
-                                                    fresh;
-                                                }
-                                                case otherwise => otherwise.newest;
-                                            }
-                                            
-                                            val file = java.io.File(sourceWrapper.absPath);
+                                            // sourcename is guaranteed to exist by virtual of `isCfSourceFile` guard but that is hard to reason about
+                                            val remappedPath = sourcePathRemapper.remap(event.location.declaringType.sourceName);
+                                            val sourceWrapper = sourceManager.addOrGet(refType, remappedPath);
                                             val source = lsp4j_Source();
-                                            source.setName(file.getName());
-                                            source.setPath(file.getPath());
-
+                                            val file = java.io.File(remappedPath);
+                                            source.setName(file.getName);
+                                            source.setPath(file.getPath);
                                             source;
                                         }
                 
@@ -628,7 +639,8 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr:
                             });
                         }
                         case event : BreakpointEvent => {
-                            withConsumedFrame(event.thread().frame(0), event.thread, (consumedFrame) => {
+                            if isCfSourceFile(event.location.declaringType)
+                            then withConsumedFrame(event.thread().frame(0), event.thread, (consumedFrame) => {
                                 guardLoadedMirrors(consumedFrame.thread);
 
                                 if (fixme_currentStepRequest != null) {
@@ -642,19 +654,13 @@ class CfVirtualMachine(vm: VirtualMachine, client: IDebugProtocolClient, stderr:
                                         fixme_currentPageContext = pageContext;
                 
                                         val source = {
+                                            // sourcename is guaranteed to exist by virtual of `isCfSourceFile` guard but that is hard to reason about
+                                            val remappedPath = sourcePathRemapper.remap(event.location.declaringType.sourceName);
+                                            val sourceWrapper = sourceManager.addOrGet(refType, remappedPath);
                                             val source = lsp4j_Source();
-                                            sourceManager.get(refType) match {
-                                                case Some(cfSourceFileWrapper) => {
-                                                    val file = java.io.File(cfSourceFileWrapper.absPath);
-                                                    source.setName(file.getName());
-                                                    source.setPath(file.getPath());
-                                                }
-                                                case None => {
-                                                    source.setName("<<unknown>>")
-                                                    source.setPath("");
-                                                }
-                                            }
-                
+                                            val file = java.io.File(remappedPath);
+                                            source.setName(file.getName);
+                                            source.setPath(file.getPath);
                                             source;
                                         }
                 
@@ -729,9 +735,16 @@ object CfVirtualMachine {
     private val cfmOrCfcPattern = """(?i)\.(cfm|cfml|cfc)$""".r;
     private val DEFAULT_STRATUM : Null = null;
 
-    type SourcePath = String;
+    type Path = String;
 
-    def maybeCfSourceFilePath(refType: ReferenceType) : Option[SourcePath] = {
+    def isCfSourceFile(refType: ReferenceType) : Boolean = {
+        maybeCfSourceFilePath(refType) match {
+            case Some(_) => true
+            case None => false
+        }
+    }
+
+    def maybeCfSourceFilePath(refType: ReferenceType) : Option[Path] = {
         Try(refType.sourceName()) match {
             case Success(sourceName) =>
                 if cfmOrCfcPattern.findFirstIn(sourceName).isDefined

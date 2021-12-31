@@ -3,23 +3,7 @@ package CfDebugAdapter
 import org.eclipse.lsp4j.debug.*;
 import com.sun.jdi.ReferenceType;
 import java.util.ArrayList
-
-type jdiUniqueThreadId = Long;
-type cfThreadId = Int;
-
-class cfThread(
-    val jdiThreadId: jdiUniqueThreadId,
-    val cfThreadId: cfThreadId,
-    val name: String);
-
-object Lsp4jConverter {
-    def cfThread(cfThread: cfThread) : org.eclipse.lsp4j.debug.Thread = {
-        val result = Thread();
-        result.setId(cfThread.cfThreadId);
-        result.setName(cfThread.name);
-        return result;
-    }
-}
+import scala.util.matching.Regex
 
 object ConstantPoolHelper {
     val CONSTANT_Class              = 7;
@@ -71,9 +55,48 @@ object ConstantPoolHelper {
     }
 }
 
+// remap with a from/to glob pattern like "/abc/*" -> "/xyz/*",
+// a path like "/abc/index.cfm" becomes "/xyz/index.cfm"
+class PathGlobRemapper(val from: String, to: String) {
+    private val isValid = {
+        def hasOneGlob(s: String) = s.indexOf("*") == s.lastIndexOf("*");
+        hasOneGlob(from) && hasOneGlob(to);
+    }
+
+    private var pattern = {
+        if isValid
+        then Some(("^" + from.replace("*", "(.*?)") + "$").r);
+        else None
+    }
+
+    def remap(path: String) = {
+        pattern match {
+            case Some(regex) => {
+                path match {
+                    case regex(globPart) => to.replace("*", globPart);
+                    case _ => path
+                }
+            }
+            case None => path;
+        }
+    }
+
+    private def forceIdentityRemap = pattern = None;
+}
+object PathGlobRemapper {
+    def identityRemapper : PathGlobRemapper = {
+        val result = PathGlobRemapper("","");
+        result.forceIdentityRemap;
+        result;
+    }
+}
+
 class CfSourceFileWrapper(val absPath: String, val refType: ReferenceType) {
     lazy val compileTime : Long = getCompileTime();
-    
+    // originalSourceAbsPath
+    // className
+    // 
+
     /**
      * we expect that (for lucee at least) there is a method
      * `long getCompileTime() { return <constexpr>; }`
